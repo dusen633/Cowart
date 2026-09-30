@@ -1,3 +1,5 @@
+import { reportCowartStartup } from './widgetStartup.js'
+
 const CANVAS_ENDPOINT = '/api/canvas'
 const SELECTION_ENDPOINT = '/api/selection'
 const VIEW_STATE_ENDPOINT = '/api/view-state'
@@ -52,7 +54,10 @@ function abortError() {
 
 async function waitForWidgetPayload(signal) {
   if (!hasCowartWidgetBridge()) return
-  if (hasWidgetStorageTarget()) return
+  if (hasWidgetStorageTarget()) {
+    reportCowartStartup('storage_target_ready')
+    return
+  }
 
   await new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -60,8 +65,10 @@ async function waitForWidgetPayload(signal) {
       return
     }
 
+    reportCowartStartup('storage_waiting')
     const timer = window.setTimeout(() => {
       cleanup()
+      reportCowartStartup('storage_target_timeout')
       reject(new Error('Cowart widget storage target was not ready. Refusing to read or write without projectDir/canvasDir.'))
     }, WIDGET_PAYLOAD_TIMEOUT_MS)
     const cleanup = () => {
@@ -71,6 +78,7 @@ async function waitForWidgetPayload(signal) {
     }
     const finish = () => {
       cleanup()
+      reportCowartStartup('storage_target_ready')
       resolve()
     }
     const handleGlobals = () => {
@@ -81,7 +89,9 @@ async function waitForWidgetPayload(signal) {
       reject(abortError())
     }
 
-    window.addEventListener('openai:set_globals', handleGlobals, { once: true })
+    // Host context/capabilities can arrive before the tool result. Keep listening
+    // until the storage target arrives; cleanup handles success, abort and timeout.
+    window.addEventListener('openai:set_globals', handleGlobals)
     signal?.addEventListener('abort', handleAbort, { once: true })
   })
 }
@@ -110,16 +120,23 @@ async function fetchJson(url, options = {}) {
 
 export async function loadCowartCanvasState(signal) {
   if (hasCowartWidgetBridge()) {
-    const state = await callCowartServerTool(
-      TOOL_GET_CANVAS_STATE,
-      { hydrateAssets: false },
-      { signal }
-    )
-    return {
-      snapshot: state.snapshot,
-      viewState: state.viewState ?? null,
-      storage: state.storage,
-      skippedRecords: []
+    reportCowartStartup('canvas_load_started')
+    try {
+      const state = await callCowartServerTool(
+        TOOL_GET_CANVAS_STATE,
+        { hydrateAssets: false },
+        { signal }
+      )
+      reportCowartStartup('canvas_state_loaded')
+      return {
+        snapshot: state.snapshot,
+        viewState: state.viewState ?? null,
+        storage: state.storage,
+        skippedRecords: []
+      }
+    } catch (error) {
+      if (error.name !== 'AbortError') reportCowartStartup('canvas_load_failed')
+      throw error
     }
   }
 

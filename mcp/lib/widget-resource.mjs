@@ -3,6 +3,7 @@ import {
   registerAppResource,
 } from "@modelcontextprotocol/ext-apps/server";
 import { MCP_APPS_GLOBAL_SCRIPT } from "../generated/mcp-apps-global-script.mjs";
+import { installCowartStartupDiagnostics } from "../../src/widgetStartup.js";
 
 export function inlineWidget({
   html,
@@ -82,6 +83,9 @@ export function registerWidgetResource(
 
 function injectMcpHostBridge(html, { appVersion, initialDisplayMode = "" } = {}) {
   const bridge = [
+    '<script id="cowartStartupDiagnostics">',
+    escapeInlineScript(`(${installCowartStartupDiagnostics.toString()})(${JSON.stringify(appVersion)});`),
+    "</script>",
     '<script id="cowartInitialDisplayMode">',
     `window.__COWART_INITIAL_DISPLAY_MODE__=${JSON.stringify(initialDisplayMode)};`,
     "</script>",
@@ -111,10 +115,15 @@ function mcpHostBridgeScript(appVersion) {
   return `(() => {
   "use strict";
 
+  const reportStartup = globalThis.__COWART_REPORT_STARTUP__ || (() => {});
   const apps = globalThis.__COWART_MCP_APPS__;
-  if (!apps || typeof apps.App !== "function") return;
+  if (!apps || typeof apps.App !== "function") {
+    reportStartup("sdk_missing");
+    return;
+  }
 
   let mcpApp = null;
+  let bridgeTimer;
 
   function publishHostGlobals(globals) {
     window.openai = Object.assign(window.openai || {}, globals);
@@ -275,6 +284,8 @@ function mcpHostBridgeScript(appVersion) {
 
   function handleToolResult(result) {
     const { metadata, payload } = payloadFromToolResult(result);
+    reportStartup("tool_result_received");
+    if (!payload.projectDir && !payload.canvasDir) reportStartup("tool_result_missing_target");
     publishHostGlobals({
       rawToolResult: result,
       toolOutput: payload,
@@ -302,8 +313,13 @@ function mcpHostBridgeScript(appVersion) {
     mcpApp.addEventListener("hostcontextchanged", applyHostContext);
     mcpApp.addEventListener("toolresult", handleToolResult);
 
+    reportStartup("bridge_connecting");
+    // Observe a stalled handshake without cancelling a host that becomes ready later.
+    bridgeTimer = setTimeout(() => reportStartup("bridge_timeout"), 5000);
     mcpApp.ready = mcpApp.connect()
       .then(() => {
+        clearTimeout(bridgeTimer);
+        reportStartup("bridge_ready");
         installCowartApi(mcpApp);
         publishHostGlobals({
           hostCapabilities: mcpApp.getHostCapabilities && mcpApp.getHostCapabilities(),
@@ -317,10 +333,14 @@ function mcpHostBridgeScript(appVersion) {
         sendCurrentSize();
       })
       .catch((error) => {
+        clearTimeout(bridgeTimer);
         globalThis.__COWART_MCP_HOST_ERROR__ = error;
+        reportStartup("bridge_failed");
       });
   } catch (error) {
+    clearTimeout(bridgeTimer);
     globalThis.__COWART_MCP_HOST_ERROR__ = error;
+    reportStartup("bridge_failed");
   }
 })();`;
 }

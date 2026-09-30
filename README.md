@@ -147,6 +147,10 @@ npm run build
 
 `npm run build` 会重新生成并校验 `mcp/generated/` 下需要随 Git 版本提交的自包含 MCP 和 Widget 发布产物。提交源码改动前还应运行 `npm run quality`，其中包含一个没有 `node_modules`、使用全新临时目录且禁止调用 npm 的冷启动探针。
 
+`npm run probe:widget:startup` 检查实际 MCP 资源中的启动脚本，并在隔离环境中测试宿主信息先于项目目录到达、超时、取消和桥接失败；它已纳入 `npm run quality`。这些测试不代替 Windows / macOS 上的 Codex 原生界面验证。
+
+排查原生画布启动问题时，可在 Codex 客户端日志中搜索 `[Cowart startup]`。从 0.1.29 起，日志记录版本号、启动阶段和耗时，包括 `html_loaded`、`bridge_connecting` / `bridge_ready`、`frontend_started`、`tool_result_received`、`storage_target_ready`、`canvas_state_loaded` 和 `canvas_mounted`。它们的顺序可能随宿主时序变化；失败会记录对应的 `*_failed`、`*_timeout` 或脚本错误阶段。为兼容 Codex 26.928 只收集沙箱 warning/error 的行为，正常启动阶段使用 warning 级别，不代表故障。每个阶段最多记录一次，画布挂载后停止；不记录目录、画布内容或原始错误消息。
+
 本地开发时仍可以直接启动 Vite 画布服务，并指定用户项目目录：
 
 ```bash

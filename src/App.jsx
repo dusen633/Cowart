@@ -63,6 +63,7 @@ import { AllSelection } from '@tiptap/pm/state'
 import html2canvas from 'html2canvas'
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Download, FileCode, Image as ImageIcon, Play, X } from 'lucide-react'
 import 'tldraw/tldraw.css'
+import { reportCowartStartup } from './widgetStartup.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import aiHtmlToolIconRaw from './assets/ai-html.svg?raw'
 import aiImageToolIconRaw from './assets/ai-image.svg?raw'
@@ -5871,6 +5872,7 @@ export default function App() {
         setViewState(canvasState.viewState ?? null)
       } catch (error) {
         if (error.name === 'AbortError') return
+        reportCowartStartup('canvas_load_failed')
         setLoadError(error)
         setSnapshot(null)
         setViewState(null)
@@ -5883,6 +5885,7 @@ export default function App() {
   }, [])
 
   const handleMount = useCallback((editor) => {
+    reportCowartStartup('canvas_mounted')
     trackCanvasOpened()
     window.__cowartEditor = editor
     window.__cowartSelection = () => getCowartSelection(editor)

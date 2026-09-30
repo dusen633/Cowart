@@ -1,6 +1,6 @@
 {
   "name": "cowart",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "description": "A native tldraw canvas for Codex, backed by cowart_mcp. Use render_cowart_canvas_widget to open, reopen, or explicitly refresh the canvas, and reuse an existing widget for Cowart workflows.",
   "author": {
     "name": "ZHONG XIN",

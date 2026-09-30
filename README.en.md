@@ -145,6 +145,10 @@ npm run build
 
 `npm run build` regenerates and validates the self-contained MCP and widget release artifacts under `mcp/generated/`; those files must be committed with the Git release. Before committing source changes, also run `npm run quality`, which includes a cold-start probe with no `node_modules`, a fresh temporary directory, and an npm sentinel that fails if runtime installation is attempted.
 
+`npm run probe:widget:startup` checks the startup scripts in the actual MCP resource and tests host information arriving before the project path, timeouts, cancellation, and bridge failures in an isolated environment. It is included in `npm run quality`. These tests do not replace native Codex UI verification on Windows / macOS.
+
+To diagnose native canvas startup, search the Codex client logs for `[Cowart startup]`. Since 0.1.29, these entries include the version, stage, and elapsed time: `html_loaded`, `bridge_connecting` / `bridge_ready`, `frontend_started`, `tool_result_received`, `storage_target_ready`, `canvas_state_loaded`, and `canvas_mounted`. Ordering can vary with host timing; failures record a corresponding `*_failed`, `*_timeout`, or script error stage. Successful milestones use warning level because Codex 26.928 only captures sandbox warnings and errors; those milestones are not failures. Each stage is logged once, logging stops after the canvas mounts, and paths, canvas content, and raw error messages are excluded.
+
 For local development, you can still start the Vite canvas service directly and pass the active user project directory:
 
 ```bash
