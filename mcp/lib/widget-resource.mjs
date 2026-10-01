@@ -297,15 +297,42 @@ function mcpHostBridgeScript(appVersion) {
   }
 
   function payloadFromToolResult(result) {
+    // Project conversations can deliver the entire MCP result as JSON text in
+    // a content block, while the sidebar delivers the native result directly.
+    for (let depth = 0; depth < 3; depth++) {
+      if (result?.structuredContent || result?._meta?.widgetData) break;
+      const content = result?.content;
+      if (!Array.isArray(content) || content.length !== 1 || content[0]?.type !== "text") break;
+      try {
+        const decoded = JSON.parse(content[0].text);
+        if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) break;
+        result = decoded;
+      } catch (_error) {
+        break;
+      }
+    }
     const metadata = result && typeof result === "object" ? result._meta || {} : {};
     const payload = metadata.widgetData || result?.structuredContent || result || {};
     return { metadata, payload };
   }
 
+  function handleToolInput(input) {
+    const args = input?.arguments;
+    if (!args?.projectDir && !args?.canvasDir) return;
+    // Retain the explicit project even if a large/old result is malformed.
+    // An empty sidebar launch must still wait for its resolved Documents path.
+    publishHostGlobals({ toolOutput: { ...args } });
+  }
+
   function handleToolResult(result) {
     const { metadata, payload } = payloadFromToolResult(result);
     reportStartup("tool_result_received");
-    if (!payload.projectDir && !payload.canvasDir) reportStartup("tool_result_missing_target");
+    if (!payload.projectDir && !payload.canvasDir) {
+      if (!window.openai?.toolOutput?.projectDir && !window.openai?.toolOutput?.canvasDir) {
+        reportStartup("tool_result_missing_target");
+      }
+      return;
+    }
     publishHostGlobals({
       rawToolResult: result,
       toolOutput: payload,
@@ -321,9 +348,8 @@ function mcpHostBridgeScript(appVersion) {
   }
 
   window.addEventListener("message", (event) => {
-    const result = event.data?.params?.result;
-    if (event.data?.method === "ui/notifications/tool-result" && result) {
-      handleToolResult(result);
+    if (event.data?.method === "ui/notifications/tool-result" && event.data.params) {
+      handleToolResult(event.data.params.result || event.data.params);
     }
   });
 
@@ -337,6 +363,7 @@ function mcpHostBridgeScript(appVersion) {
     installCowartApi(mcpApp);
 
     mcpApp.addEventListener("hostcontextchanged", applyHostContext);
+    mcpApp.addEventListener("toolinput", handleToolInput);
     mcpApp.addEventListener("toolresult", handleToolResult);
 
     reportStartup("bridge_connecting");

@@ -125,7 +125,6 @@ const AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN = 16
 const AI_IMAGE_GENERATION_PANEL_ESTIMATED_H = 226
 const AI_IMAGE_GENERATION_STATUS_RESET_MS = 2200
 const AI_IMAGE_REFERENCE_MAX_FILES = 10
-const SKIPPED_RECORDS_NOTICE_AUTO_HIDE_MS = 5000
 const COWART_HTML_DRAFT_URL_ORIGIN = 'http://cowart.local'
 const COWART_HTML_DRAFT_EMBED_TYPE = 'cowart_html_draft'
 const AI_IMAGE_ASPECT_PRESETS = [
@@ -5831,7 +5830,6 @@ export default function App() {
   const [snapshot, setSnapshot] = useState()
   const [viewState, setViewState] = useState()
   const [loadError, setLoadError] = useState(null)
-  const [skippedRecords, setSkippedRecords] = useState([])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -5841,7 +5839,6 @@ export default function App() {
         const canvasState = await loadCowartCanvasState(controller.signal)
         const sanitized = sanitizeCanvasSnapshotForTldraw(canvasState.snapshot)
         setSnapshot(sanitized.snapshot)
-        setSkippedRecords(sanitized.skippedRecords)
         setViewState(canvasState.viewState ?? null)
       } catch (error) {
         if (error.name === 'AbortError') return
@@ -6045,14 +6042,13 @@ export default function App() {
         const nextSnapshot = await refreshCowartCanvasSnapshot(controller.signal)
         const effectivePreserve =
           preserveLocalChanges || (preFetchStore && storeChangedSinceSnapshot(editor, preFetchStore))
-        const { changedRecords, skippedRecords: nextSkippedRecords } = applyRemoteCanvasSnapshot(
+        const { changedRecords } = applyRemoteCanvasSnapshot(
           editor,
           nextSnapshot,
           {
             preserveLocalChanges: effectivePreserve
           }
         )
-        setSkippedRecords(nextSkippedRecords)
 
         if (changedRecords > 0 && effectivePreserve) {
           hasUnsavedChanges = true
@@ -6204,7 +6200,6 @@ export default function App() {
 
   return (
     <main className="cowart-canvas" aria-label="Cowart infinite canvas">
-      <SkippedRecordsNotice records={skippedRecords} />
       <Tldraw
         snapshot={snapshot ?? undefined}
         assetUrls={cowartAssetUrls}
@@ -6218,55 +6213,5 @@ export default function App() {
         tools={[CowartAnnotationTool]}
       />
     </main>
-  )
-}
-
-function SkippedRecordsNotice({ records }) {
-  const [isVisible, setIsVisible] = useState(false)
-  const [isDetailsOpen, setIsDetailsOpen] = useState(false)
-  const recordsKey = records
-    .map((record) => `${record.id}:${record.typeName ?? ''}:${record.type ?? ''}:${record.reason}`)
-    .join('\n')
-
-  useEffect(() => {
-    if (!records.length) {
-      setIsVisible(false)
-      setIsDetailsOpen(false)
-      return
-    }
-
-    setIsVisible(true)
-    setIsDetailsOpen(false)
-  }, [records.length, recordsKey])
-
-  useEffect(() => {
-    if (!records.length || !isVisible || isDetailsOpen) return undefined
-
-    const noticeTimer = window.setTimeout(() => {
-      setIsVisible(false)
-    }, SKIPPED_RECORDS_NOTICE_AUTO_HIDE_MS)
-
-    return () => window.clearTimeout(noticeTimer)
-  }, [records.length, recordsKey, isVisible, isDetailsOpen])
-
-  if (!records.length || !isVisible) return null
-
-  return (
-    <aside className="cowart-skipped-records" aria-live="polite">
-      <strong>Skipped {records.length} invalid canvas record{records.length === 1 ? '' : 's'}.</strong>
-      <span>Valid content was loaded.</span>
-      <details open={isDetailsOpen} onToggle={(event) => setIsDetailsOpen(event.currentTarget.open)}>
-        <summary>Details</summary>
-        <ul>
-          {records.slice(0, 8).map((record, index) => (
-            <li key={`${record.id}:${index}`}>
-              <code>{record.id}</code>
-              {record.typeName ? ` ${record.typeName}` : ''}
-              {record.type ? `/${record.type}` : ''}: {record.reason}
-            </li>
-          ))}
-        </ul>
-      </details>
-    </aside>
   )
 }

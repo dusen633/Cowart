@@ -63,6 +63,7 @@ const PAGE_ID_PREFIX = "page:";
 const COWART_WIDGET_URI = "ui://widget/cowart/canvas.html";
 const COWART_HTML_DRAFT_URL_ORIGIN = "http://cowart.local";
 const DEFAULT_DISPLAY_MODE = "fullscreen";
+const MAX_INITIAL_CANVAS_STATE_BYTES = 32 * 1024;
 const COWART_GOOGLE_DOMAINS = [
   "https://www.google-analytics.com",
   "https://region1.google-analytics.com",
@@ -1102,6 +1103,7 @@ function registerCowartWidget(mcpServer) {
       const target = await resolveLauncherTarget(input);
       const title = nonEmptyString(input.title) || "Cowart Canvas";
       const preferredDisplayMode = normalizeDisplayMode(input.displayMode);
+      const canvasState = await launcherCanvasState(target, { ensurePage: globalWorkspace });
       const widgetData = {
         version: 1,
         widget: "cowart-canvas-widget",
@@ -1112,7 +1114,11 @@ function registerCowartWidget(mcpServer) {
         view: "canvas",
         ...target,
         ...(globalWorkspace ? { globalWorkspace: true } : {}),
-        canvasState: await launcherCanvasState(target, { ensurePage: globalWorkspace }),
+        // The host may serialize this result into text and duplicate widgetData.
+        // Large projects load through the app tool bridge after receiving paths.
+        ...(Buffer.byteLength(JSON.stringify(canvasState), "utf8") <= MAX_INITIAL_CANVAS_STATE_BYTES
+          ? { canvasState }
+          : {}),
       };
       return {
         content: [

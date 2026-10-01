@@ -1,6 +1,6 @@
 {
   "name": "cowart",
-  "version": "0.1.30",
+  "version": "0.1.31",
   "description": "A native fullscreen tldraw canvas for visual thinking and image workflows. Open Cowart from the sidebar or pass projectDir to render_cowart_canvas_widget; reuse the existing canvas for subsequent work.",
   "author": {
     "name": "ZHONG XIN",

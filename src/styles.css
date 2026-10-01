@@ -26,64 +26,6 @@ body {
   min-height: 0;
 }
 
-.cowart-skipped-records {
-  position: fixed;
-  z-index: 1000;
-  top: 12px;
-  left: 50%;
-  display: flex;
-  max-width: min(680px, calc(100vw - 32px));
-  padding: 10px 14px;
-  gap: 10px;
-  align-items: center;
-  flex-wrap: wrap;
-  color: #1f2937;
-  font-size: 13px;
-  line-height: 1.35;
-  background: #fff7d1;
-  border: 1px solid #e6c65c;
-  border-radius: 8px;
-  box-shadow: 0 8px 28px rgb(31 41 55 / 16%);
-  transform: translateX(-50%);
-}
-
-.cowart-skipped-records strong {
-  font-weight: 700;
-}
-
-.cowart-skipped-records details {
-  position: relative;
-}
-
-.cowart-skipped-records summary {
-  color: #174ea6;
-  cursor: pointer;
-}
-
-.cowart-skipped-records ul {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  width: min(640px, calc(100vw - 32px));
-  max-height: 260px;
-  padding: 12px 14px 12px 30px;
-  overflow: auto;
-  color: #1f2937;
-  background: #fff;
-  border: 1px solid #d1d5db;
-  border-radius: 8px;
-  box-shadow: 0 12px 36px rgb(31 41 55 / 18%);
-}
-
-.cowart-skipped-records li + li {
-  margin-top: 8px;
-}
-
-.cowart-skipped-records code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-}
-
 .cowart-status {
   display: grid;
   width: 100%;

@@ -105,6 +105,20 @@ try {
   assert.deepEqual(projectReopen.canvasState.viewState.camera, viewState.camera)
   assert.deepEqual((await call(openerName)).structuredContent.canvasState, multiPage, 'Project operations do not change the sidebar canvas')
 
+  // Existing project snapshots can be much larger than a model tool result.
+  // Keep opening small and load the full snapshot through the app bridge.
+  const largeSnapshot = structuredClone(snapshot)
+  largeSnapshot.store[secondPage.id].name = '画布'.repeat(50000)
+  await call('save_cowart_canvas_state', { projectDir, canvasDir: customCanvasDir, snapshot: largeSnapshot })
+  const largeLaunch = await call(openerName, { projectDir, canvasDir: customCanvasDir })
+  assert.equal(largeLaunch.structuredContent.projectDir, projectDir)
+  assert.equal(largeLaunch.structuredContent.canvasDir, customCanvasDir)
+  assert.equal(largeLaunch.structuredContent.canvasState, undefined)
+  assert.ok(Buffer.byteLength(JSON.stringify(largeLaunch), 'utf8') < 80 * 1024)
+  assert.deepEqual((await call('get_cowart_canvas_state', { projectDir, canvasDir: customCanvasDir, hydrateAssets: false })).structuredContent.snapshot,
+    largeSnapshot, 'The full persisted canvas remains available')
+  assert.deepEqual((await call(openerName)).structuredContent.canvasState, multiPage, 'Large project loading leaves Documents isolated')
+
   for (const args of [{ projectDir: '.' }, { projectDir: join(sandbox, 'missing') }, { projectDir: pluginCache }]) {
     assert.equal((await call(openerName, args)).isError, true)
   }

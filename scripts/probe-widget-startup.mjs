@@ -121,6 +121,12 @@ function harness({ missingSdk = false, constructorError = false, toolError = fal
     result(payload) {
       context.__COWART_MCP_APP__.handlers.get('toolresult')({ structuredContent: payload })
     },
+    rawResult(result) {
+      context.__COWART_MCP_APP__.handlers.get('toolresult')(result)
+    },
+    input(args) {
+      context.__COWART_MCP_APP__.handlers.get('toolinput')({ arguments: args })
+    },
     globals() {
       context.__COWART_MCP_APP__.handlers.get('hostcontextchanged')({ theme: 'dark' })
     },
@@ -329,6 +335,68 @@ test('first canvas load reuses the opener state without another server call', as
   const result = await h.load()
   assert.equal(result.storage, 'empty')
   assert.equal(h.calls.length, 0)
+  h.assertClean()
+})
+
+test('project conversation JSON content wrappers preserve the target and initial state', async () => {
+  for (const layers of [1, 2]) {
+    const h = harness()
+    await h.ready()
+    const loaded = h.load()
+    const payload = { projectDir: '/projects/项目 with spaces', canvasDir: '/projects/项目 with spaces/canvas',
+      canvasState: { snapshot: null, viewState: { currentPageId: 'page:existing' }, storage: 'per-page' } }
+    let result = { content: [{ type: 'text', text: 'Rendered Cowart canvas widget.' }],
+      structuredContent: payload, _meta: { widgetData: payload } }
+    for (let i = 0; i < layers; i++) result = { content: [{ type: 'text', text: JSON.stringify(result) }] }
+    h.rawResult(result)
+    const state = await loaded
+    assert.equal(state.storage, 'per-page')
+    assert.equal(state.viewState.currentPageId, 'page:existing')
+    assert.equal(h.window.openai.toolOutput.projectDir, payload.projectDir)
+    assert.equal(h.calls.length, 0)
+    assert.ok(!h.stages().includes('tool_result_missing_target'))
+    h.assertClean()
+  }
+})
+
+test('an explicit project input survives a malformed old result and reads through the app bridge', async () => {
+  const h = harness()
+  await h.ready()
+  const loaded = h.load()
+  const projectDir = '/projects/existing'
+  h.input({ projectDir })
+  // This is the extra closing brace present in the failing conversation result.
+  h.rawResult({ content: [{ type: 'text', text: JSON.stringify({ structuredContent: { projectDir } }) + '}' }] })
+  await loaded
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.calls[0].arguments.projectDir, projectDir)
+  assert.equal(h.calls[0].arguments.hydrateAssets, false)
+  assert.ok(!h.stages().includes('storage_target_timeout'))
+  h.assertClean()
+})
+
+test('empty sidebar inputs cannot replace the resolved global workspace', async () => {
+  const h = harness()
+  await h.ready()
+  h.input({})
+  assert.equal(h.window.openai.toolOutput, undefined)
+  h.result({ globalWorkspace: true, projectDir: '/Documents/Cowart', canvasDir: '/Documents/Cowart/canvas' })
+  h.input({})
+  h.rawResult({ content: [{ type: 'text', text: 'Not a storage target' }] })
+  await h.load()
+  assert.equal(h.calls[0].arguments.projectDir, '/Documents/Cowart')
+  h.assertClean()
+})
+
+test('standard tool-result postMessages use params directly', async () => {
+  const h = harness()
+  await h.ready()
+  const loaded = h.load()
+  h.window.dispatchEvent(Object.assign(new Event('message'), { data: {
+    method: 'ui/notifications/tool-result', params: { structuredContent: { projectDir: '/projects/existing' } }
+  } }))
+  await loaded
+  assert.equal(h.calls[0].arguments.projectDir, '/projects/existing')
   h.assertClean()
 })
 
