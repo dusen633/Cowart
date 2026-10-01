@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -10,8 +10,10 @@ const transportEnvironment = Object.fromEntries(
   Object.entries(process.env).filter(([, value]) => typeof value === "string"),
 );
 const serverRoot = path.resolve(optionValue("--server-root") || process.cwd());
+const probeUserData = await realpath(await mkdtemp(path.join(tmpdir(), "cowart-probe-documents-")));
 const maximumStartupMs = Number(optionValue("--max-startup-ms") || 0);
 transportEnvironment.COWART_PLUGIN_ROOT = serverRoot;
+transportEnvironment.COWART_DOCUMENTS_DIR = probeUserData;
 const transport = new StdioClientTransport({
   command: "node",
   args: ["./scripts/start-mcp.mjs"],
@@ -90,7 +92,13 @@ try {
     throw new Error("Cowart clipboard tool should only be visible to the widget app.");
   }
 
-  projectDir = await mkdtemp(path.join(tmpdir(), "cowart-widget-probe-"));
+  const globalLaunch = await client.callTool({ name: "render_cowart_canvas_widget", arguments: {} });
+  if (globalLaunch.structuredContent?.view !== "canvas" ||
+      globalLaunch.structuredContent?.canvasDir !== path.join(probeUserData, "Cowart", "canvas") ||
+      !Object.values(globalLaunch.structuredContent?.canvasState?.snapshot?.store || {}).some((record) => record.typeName === "page")) {
+    throw new Error("A global launch must open Documents/Cowart/canvas directly with an initial page.");
+  }
+  projectDir = await realpath(await mkdtemp(path.join(tmpdir(), "cowart-widget-probe-")));
   const renderResult = await client.callTool({
     name: "render_cowart_canvas_widget",
     arguments: {
@@ -291,6 +299,7 @@ try {
     await rm(projectDir, { recursive: true, force: true }).catch(() => undefined);
   }
   await client.close();
+  await rm(probeUserData, { recursive: true, force: true });
 }
 
 function optionValue(name) {

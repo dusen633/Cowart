@@ -122,7 +122,12 @@ export async function loadCowartCanvasState(signal) {
   if (hasCowartWidgetBridge()) {
     reportCowartStartup('canvas_load_started')
     try {
-      const state = await callCowartServerTool(
+      if (signal?.aborted) throw abortError()
+      await waitForWidgetPayload(signal)
+      if (signal?.aborted) throw abortError()
+      // The opener already read the initial state. Reuse it without a second
+      // tool call; later refreshes continue to read the persisted project.
+      const state = currentWidgetPayload().canvasState || await callCowartServerTool(
         TOOL_GET_CANVAS_STATE,
         { hydrateAssets: false },
         { signal }

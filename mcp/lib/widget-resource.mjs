@@ -54,6 +54,10 @@ export function registerWidgetResource(
     "openai/widgetDescription": description,
     "openai/widgetPrefersBorder": prefersBorder,
     "openai/widgetCSP": openAiCsp,
+    "openai/ui": {
+      availableDisplayModes: ["fullscreen"],
+      preferredDisplayMode: "fullscreen",
+    },
   };
 
   registerAppResource(
@@ -213,6 +217,17 @@ function mcpHostBridgeScript(appVersion) {
     }
   }
 
+  function globalWorkspaceContext(payload) {
+    if (!payload?.globalWorkspace || !payload.projectDir || !payload.canvasDir) return null;
+    return {
+      type: "text",
+      text: "This request belongs to the open Cowart Documents canvas. Pass these exact paths to Cowart tools: " +
+        JSON.stringify({ projectDir: payload.projectDir, canvasDir: payload.canvasDir }) +
+        ". Reuse this canvas; do not substitute the conversation working directory or open another widget.",
+      annotations: { audience: ["assistant"] },
+    };
+  }
+
   function installCowartApi(app) {
     const api = window.cowartMcp || {};
     window.cowartMcp = api;
@@ -222,10 +237,15 @@ function mcpHostBridgeScript(appVersion) {
         const prompt = promptFromMessage(message);
         if (!prompt) throw new Error("Missing follow-up prompt.");
         if (!app || typeof app.sendMessage !== "function") throw new Error("Host bridge is unavailable.");
+        const content = [...contentFromMessage(message, prompt)];
+        // Capture the target at send time. Project-conversation messages retain
+        // their existing content and routing.
+        const workspaceContext = globalWorkspaceContext(window.openai?.toolOutput);
+        if (workspaceContext) content.push(workspaceContext);
         await waitForReady(app);
         const result = await withTimeout(app.sendMessage({
           role: "user",
-          content: contentFromMessage(message, prompt),
+          content,
         }), 8000, "Host did not accept the follow-up message.");
         if (result?.isError) throw new Error("Host rejected the follow-up message.");
         return result || {};
@@ -291,6 +311,12 @@ function mcpHostBridgeScript(appVersion) {
       toolOutput: payload,
       toolResponseMetadata: metadata,
     });
+    const workspaceContext = globalWorkspaceContext(payload);
+    if (workspaceContext) {
+      window.cowartMcp.updateModelContext({ content: [workspaceContext] }).catch(() => {
+        console.warn("Cowart could not attach its workspace context to the conversation.");
+      });
+    }
     sendCurrentSize();
   }
 
@@ -304,7 +330,7 @@ function mcpHostBridgeScript(appVersion) {
   try {
     mcpApp = new apps.App(
       { name: "cowart", version: ${JSON.stringify(appVersion)} },
-      { availableDisplayModes: ["inline", "fullscreen"] },
+      { availableDisplayModes: ["fullscreen"] },
       { autoResize: true },
     );
     globalThis.__COWART_MCP_APP__ = mcpApp;
@@ -325,10 +351,15 @@ function mcpHostBridgeScript(appVersion) {
           hostCapabilities: mcpApp.getHostCapabilities && mcpApp.getHostCapabilities(),
           hostInfo: mcpApp.getHostVersion && mcpApp.getHostVersion(),
         });
-        applyHostContext(mcpApp.getHostContext && mcpApp.getHostContext());
+        const hostContext = mcpApp.getHostContext && mcpApp.getHostContext();
+        applyHostContext(hostContext);
         const initialMode = window.__COWART_INITIAL_DISPLAY_MODE__;
-        if (initialMode === "fullscreen" && typeof mcpApp.requestDisplayMode === "function") {
-          mcpApp.requestDisplayMode({ mode: "fullscreen" }).catch(() => {});
+        if (initialMode === "fullscreen" && hostContext?.displayMode === "inline" &&
+            hostContext.availableDisplayModes?.includes("fullscreen") &&
+            typeof mcpApp.requestDisplayMode === "function") {
+          mcpApp.requestDisplayMode({ mode: "fullscreen" }).then((result) => {
+            if (result?.mode) applyHostContext({ ...mcpApp.getHostContext(), displayMode: result.mode });
+          }).catch(() => {});
         }
         sendCurrentSize();
       })

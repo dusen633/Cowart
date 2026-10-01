@@ -60,7 +60,7 @@ import {
 } from 'tldraw'
 import { getAssetUrlsByImport } from '@tldraw/assets/imports.vite'
 import { AllSelection } from '@tiptap/pm/state'
-import html2canvas from 'html2canvas'
+import { renderHtmlDraftDocument } from './htmlDraftCapture.js'
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Download, FileCode, Image as ImageIcon, Play, X } from 'lucide-react'
 import 'tldraw/tldraw.css'
 import { reportCowartStartup } from './widgetStartup.js'
@@ -1800,37 +1800,10 @@ async function renderCowartHtmlDraftCanvas(shape, pixelRatio) {
   const width = Math.max(1, Number(shape.props.w) || AI_IMAGE_HOLDER_DEFAULT_W)
   const height = Math.max(1, Number(shape.props.h) || AI_IMAGE_HOLDER_DEFAULT_H)
   const captureRatio = Math.max(1, Number(pixelRatio) || 1)
-  const canvas = await html2canvas(iframeDocument.documentElement, {
-    allowTaint: false,
-    backgroundColor: '#ffffff',
-    height,
-    logging: false,
-    onclone(clonedDocument) {
-      clonedDocument.querySelectorAll('script').forEach((script) => script.remove())
-      for (const animation of clonedDocument.getAnimations?.() || []) {
-        try {
-          const timing = animation.effect?.getComputedTiming?.()
-          if (Number.isFinite(timing?.endTime)) animation.finish()
-        } catch (_error) {
-          // Infinite or detached animations cannot be finished; pausing below still stabilizes them.
-        }
-      }
-      const captureStyle = clonedDocument.createElement('style')
-      captureStyle.textContent = `
-        html, body { width: ${width}px !important; height: ${height}px !important; }
-        *, *::before, *::after { animation-play-state: paused !important; caret-color: transparent !important; transition: none !important; }
-      `
-      clonedDocument.head?.append(captureStyle)
-    },
-    scale: captureRatio,
-    scrollX: 0,
-    scrollY: 0,
-    useCORS: true,
+  const canvas = await renderHtmlDraftDocument(iframeDocument, {
     width,
-    windowHeight: height,
-    windowWidth: width,
-    x: 0,
-    y: 0
+    height,
+    pixelRatio: captureRatio
   })
   return {
     canvas,

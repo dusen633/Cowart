@@ -29,6 +29,8 @@ meta flag. Support both shapes.
 
 ## Workflow
 
+For a follow-up from Cowart's sidebar canvas, use the exact `projectDir` and `canvasDir` in the Cowart context/message for all Cowart tools. These paths can differ from the conversation working directory. In ordinary project conversations, keep using the active user project as before.
+
 1. Read the selected shape from Cowart with the MCP `get_cowart_selection` tool. Pass the active user project directory as `projectDir`.
 
 2. Check whether exactly one selected shape is an AI image holder. A holder is any selected shape with either:

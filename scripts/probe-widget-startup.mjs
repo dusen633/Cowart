@@ -36,6 +36,7 @@ const script = (id) => {
   return new vm.Script(match[2])
 }
 const bootstrap = script('cowartStartupDiagnostics')
+const displayModeScript = script('cowartInitialDisplayMode')
 const bridge = script('cowartMcpHostBridge')
 const clientBundle = await build({
   absWorkingDir: root,
@@ -48,10 +49,14 @@ const clientBundle = await build({
 })
 const clientScript = new vm.Script(clientBundle.outputFiles[0].text)
 
-function harness({ missingSdk = false, constructorError = false, toolError = false } = {}) {
+function harness({ missingSdk = false, constructorError = false, toolError = false,
+  hostContext = { theme: 'light', displayMode: 'inline' }, grantedMode = 'fullscreen' } = {}) {
   const window = new EventTarget()
   const calls = []
   const logs = []
+  const displayRequests = []
+  const contexts = []
+  const messages = []
   const timers = new Map()
   let now = 0
   let nextTimer = 0
@@ -76,8 +81,11 @@ function harness({ missingSdk = false, constructorError = false, toolError = fal
     connect() { return connection }
     getHostCapabilities() { return { serverTools: {} } }
     getHostVersion() { return { name: 'test-host', version: '1' } }
-    getHostContext() { return { theme: 'light', displayMode: 'inline' } }
+    getHostContext() { return hostContext }
+    async requestDisplayMode(request) { displayRequests.push(request); return { mode: grantedMode } }
     sendSizeChanged() {}
+    async updateModelContext(request) { contexts.push(request); return {} }
+    async sendMessage(request) { messages.push(request); return {} }
     async callServerTool(request) {
       calls.push(request)
       if (toolError) return { isError: true, content: [{ type: 'text', text: 'private tool failure' }] }
@@ -93,12 +101,13 @@ function harness({ missingSdk = false, constructorError = false, toolError = fal
     }
   })
   bootstrap.runInContext(context)
+  displayModeScript.runInContext(context)
   if (!missingSdk) context.__COWART_MCP_APPS__ = { App: FakeApp }
   bridge.runInContext(context)
   clientScript.runInContext(context)
 
   return {
-    window, calls, logs, timers, context,
+    window, calls, logs, timers, context, displayRequests, contexts, messages,
     stages: () => Array.from(context.__COWART_STARTUP__.events, ({ stage }) => stage),
     load: (signal) => context.cowartClient.loadCowartCanvasState(signal),
     async ready() {
@@ -281,5 +290,72 @@ test('diagnostics have the release version, deduplicate stages and stop after mo
   assert.equal(h.logs.length, count)
   assert.equal(getEventListeners(h.window, 'error').length, 0)
   assert.equal(getEventListeners(h.window, 'unhandledrejection').length, 0)
+  h.assertClean()
+})
+
+test('global canvas context and follow-ups use Documents even when the chat has another cwd', async () => {
+  const h = harness()
+  await h.ready()
+  const target = { globalWorkspace: true, projectDir: '/Documents/Cowart', canvasDir: '/Documents/Cowart/canvas' }
+  h.result({ view: 'canvas', ...target })
+  await flush()
+  assert.ok(!h.stages().includes('tool_result_missing_target'))
+  assert.equal(h.contexts.length, 1)
+  assert.match(h.contexts[0].content[0].text, /\/Documents\/Cowart\/canvas/)
+  const content = [{ type: 'text', text: 'Generate an image in this holder.' }]
+  await h.window.cowartMcp.sendFollowUpMessage({ prompt: content[0].text, content })
+  assert.equal(content.length, 1, 'Do not mutate the caller message when attaching the workspace')
+  assert.equal(h.messages[0].content.length, 2)
+  assert.match(h.messages[0].content[1].text, /\/Documents\/Cowart\/canvas/)
+  assert.equal(h.calls.length, 0)
+  h.assertClean()
+})
+
+test('project conversations keep their original follow-up content without global context', async () => {
+  const h = harness()
+  await h.ready()
+  h.result({ projectDir: '/projects/existing', canvasDir: '/projects/existing/canvas' })
+  const message = { prompt: 'Continue editing this project.', content: [{ type: 'text', text: 'Continue editing this project.' }] }
+  await h.window.cowartMcp.sendFollowUpMessage(message)
+  assert.equal(h.contexts.length, 0)
+  assert.equal(JSON.stringify(h.messages[0].content), JSON.stringify(message.content))
+  h.assertClean()
+})
+
+test('first canvas load reuses the opener state without another server call', async () => {
+  const h = harness()
+  await h.ready()
+  h.result({ projectDir: '/startup-probe/project', canvasState: { snapshot: null, viewState: null, storage: 'empty' } })
+  const result = await h.load()
+  assert.equal(result.storage, 'empty')
+  assert.equal(h.calls.length, 0)
+  h.assertClean()
+})
+
+test('fullscreen is requested once only for an inline host advertising fullscreen', async () => {
+  const h = harness({ hostContext: { displayMode: 'inline', availableDisplayModes: ['inline', 'fullscreen'] } })
+  await h.ready()
+  h.globals()
+  h.result({ projectDir: '/startup-probe/project' })
+  assert.equal(h.displayRequests.length, 1)
+  assert.equal(h.displayRequests[0].mode, 'fullscreen')
+  h.assertClean()
+})
+
+test('host placement is respected when already fullscreen or fullscreen is unavailable', async () => {
+  for (const hostContext of [
+    { displayMode: 'fullscreen', availableDisplayModes: ['fullscreen'] },
+    { displayMode: 'inline', availableDisplayModes: ['inline'] },
+    { displayMode: 'inline' }
+  ]) {
+    const h = harness({ hostContext })
+    await h.ready()
+    assert.equal(h.displayRequests.length, 0)
+    h.assertClean()
+  }
+  const h = harness({ hostContext: { displayMode: 'inline', availableDisplayModes: ['inline', 'fullscreen'] }, grantedMode: 'inline' })
+  await h.ready()
+  assert.equal(h.window.openai.displayMode, 'inline')
+  assert.equal(h.displayRequests.length, 1)
   h.assertClean()
 })

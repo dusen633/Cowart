@@ -1,7 +1,7 @@
 {
   "name": "cowart",
-  "version": "0.1.29",
-  "description": "A native tldraw canvas for Codex, backed by cowart_mcp. Use render_cowart_canvas_widget to open, reopen, or explicitly refresh the canvas, and reuse an existing widget for Cowart workflows.",
+  "version": "0.1.30",
+  "description": "A native fullscreen tldraw canvas for visual thinking and image workflows. Open Cowart from the sidebar or pass projectDir to render_cowart_canvas_widget; reuse the existing canvas for subsequent work.",
   "author": {
     "name": "ZHONG XIN",
     "email": "zhongxin123456@gmail.com",
@@ -21,8 +21,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Cowart",
-    "shortDescription": "Open a native tldraw canvas and reuse it across Cowart workflows.",
-    "longDescription": "Cowart brings a tldraw-powered native widget canvas into Codex for visual planning and creative iteration. The cowart_mcp server provides the canvas and project-backed state tools; render_cowart_canvas_widget opens, reopens, or explicitly refreshes the native canvas. Once the widget is open, image generation, annotation editing, HTML, Slides, and other Cowart workflows should reuse it and let MCP-backed storage synchronization update the canvas without rendering another widget tab.",
+    "shortDescription": "Your fullscreen project canvas",
+    "longDescription": "Cowart brings a native tldraw canvas into Codex for visual planning and creative iteration. Open Cowart from global navigation and pin it with the host pin control. The sidebar opens a single canvas in the system Documents/Cowart folder, creating the first page when needed. Project conversations with projectDir keep their own project canvas. Image, HTML, Slides and annotation workflows reuse the open canvas.",
     "developerName": "ZHONG XIN",
     "category": "Productivity",
     "websiteURL": "https://www.jiqiren.ai",
@@ -30,8 +30,8 @@
     "logo": "./assets/app-icon.png",
     "composerIcon": "./assets/app-icon.png",
     "capabilities": [
-      "Interactive canvas",
-      "Native Codex widget",
+      "Fullscreen canvas",
+      "Sidebar entrypoint",
       "AI image generation",
       "Annotation-driven editing",
       "Project-local persistence"

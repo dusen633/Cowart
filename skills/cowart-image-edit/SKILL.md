@@ -17,6 +17,8 @@ The user is responsible for providing the relevant screenshot(s). Do not auto-ca
 
 ## Workflow
 
+For a follow-up from Cowart's sidebar canvas, use the exact `projectDir` and `canvasDir` in the Cowart context/message for all Cowart tools. These paths can differ from the conversation working directory. In ordinary project conversations, keep using the active user project as before.
+
 1. Read the user-provided screenshot(s).
 
    Treat each screenshot as the authoritative edit brief for one output image unless the user says multiple screenshots belong to the same image.

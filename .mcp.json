@@ -2,7 +2,7 @@
   "mcpServers": {
     "cowart_mcp": {
       "title": "Cowart Canvas Widget MCP",
-      "description": "Core Cowart canvas MCP server. Use render_cowart_canvas_widget to open, reopen, or explicitly refresh the project canvas; use the state and insertion tools without rerendering when a Cowart widget is already open.",
+      "description": "Cowart fullscreen canvas and sidebar entrypoint. Pass projectDir to render_cowart_canvas_widget to open the active project directly; empty arguments open Documents/Cowart/canvas. Reuse the existing widget and its storage paths for state and insertion tools.",
       "command": "node",
       "args": [
         "./scripts/start-mcp.mjs"

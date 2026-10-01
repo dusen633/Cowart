@@ -19,6 +19,10 @@ The actual canvas-opening capability is the `cowart_mcp` MCP server and its `ren
 
 The tool returns `openai/outputTemplate: ui://widget/cowart/canvas.html`, which tells Codex to render the widget directly. Do not start `scripts/start-canvas.sh` or open a localhost URL for normal use.
 
+Cowart also declares an OpenAI MCP Extensions `global` entrypoint, so supported hosts can show it in navigation and let the user pin it. Clicking that entrypoint sends `{}` and opens the canvas directly at `<system Documents>/Cowart/canvas/`. This is one shared local canvas with multiple pages; the first page is created only when none exists. There is no project picker. Empty arguments never infer a workspace from the MCP process directory. When a workspace is known in chat, keep passing `projectDir` to open its canvas directly. Cowart declares only the `fullscreen` display mode; in a conversation, the host may place fullscreen apps in the content side panel.
+
+For follow-ups from the global app, use the `projectDir` and `canvasDir` supplied in Cowart's model context or follow-up message. Do not substitute the global app thread's own working directory for the open canvas.
+
 2. Confirm the widget opens for the user. The canvas data is stored in the active project:
 
 ```text

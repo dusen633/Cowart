@@ -1,5 +1,13 @@
 import { createTLStore } from 'tldraw'
 
+// Used only by the sidebar launcher when its persisted canvas has no pages.
+export function createCowartSnapshotWithDefaultPage(snapshot) {
+  const store = createTLStore()
+  if (snapshot) store.loadStoreSnapshot(snapshot)
+  store.ensureStoreIsUsable()
+  return store.getStoreSnapshot()
+}
+
 export function isCanvasSnapshot(value) {
   return value && typeof value === 'object' && value.store && value.schema
 }

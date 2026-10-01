@@ -1,8 +1,8 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "cowart",
-  "version": "0.1.29",
-  "description": "A native tldraw canvas for visual thinking and image workflows. Use cowart_mcp to open the canvas when requested and reuse an existing widget for subsequent Cowart work.",
+  "version": "0.1.30",
+  "description": "A native fullscreen tldraw canvas for visual thinking and image workflows. Open Cowart from the sidebar or pass projectDir to render_cowart_canvas_widget; reuse the existing canvas for subsequent work.",
   "author": {
     "name": "ZHONG XIN",
     "email": "zhongxin123456@gmail.com",
@@ -17,5 +17,32 @@
     "whiteboard",
     "image-generation",
     "visual-collaboration"
-  ]
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Cowart",
+        "shortDescription": "Your fullscreen project canvas",
+        "longDescription": "Cowart brings a native tldraw canvas into Codex for visual planning and creative iteration. Open Cowart from global navigation and pin it with the host pin control. The sidebar opens a single canvas in the system Documents/Cowart folder, creating the first page when needed. Project conversations with projectDir keep their own project canvas. Image, HTML, Slides and annotation workflows reuse the open canvas.",
+        "developerName": "ZHONG XIN",
+        "category": "Productivity",
+        "websiteURL": "https://www.jiqiren.ai",
+        "brandColor": "#25BFEF",
+        "logo": "./assets/app-icon.png",
+        "composerIcon": "./assets/app-icon.png",
+        "capabilities": [
+          "Fullscreen canvas",
+          "Sidebar entrypoint",
+          "AI image generation",
+          "Annotation-driven editing",
+          "Project-local persistence"
+        ],
+        "defaultPrompt": [
+          "Open the Cowart canvas for this project.",
+          "Use my Cowart annotation screenshot to generate a clean revised image beside the original.",
+          "Generate a new image into the selected Cowart AI image holder."
+        ]
+      }
+    }
+  }
 }

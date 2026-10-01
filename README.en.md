@@ -14,6 +14,7 @@ Open [**cowart.jiqiren.ai**](https://cowart.jiqiren.ai/) in the Codex built-in b
 
 ## Features
 
+- Open Cowart from global navigation and use the host's pin control to keep it in the sidebar. The sidebar opens a single canvas in the system Documents/Cowart folder directly, with no folder picker.
 - Open a native tldraw infinite-canvas widget from Codex; normal use no longer opens a local page through a web browser or the in-app browser.
 - Persist canvas pages and image assets in the active project directory.
 - Create AI image slots on the canvas, enter a prompt directly, choose reference images, and let Codex generate an image that replaces the selected slot at the same position and aspect ratio.
@@ -21,6 +22,8 @@ Open [**cowart.jiqiren.ai**](https://cowart.jiqiren.ai/) in the Codex built-in b
 - Create `AI Slides` to organize images and HTML into a deck, or ask Codex to generate a specified number of coordinated 16:9 HTML pages; preview the deck with thumbnails or play it fullscreen.
 - After annotating an image, submit the annotation screenshot directly from the canvas so Codex can generate a clean revised image beside the original.
 - Use Cowart MCP tools to read selection state, save the canvas, insert images or HTML, and save page-local assets.
+
+The [OpenAI MCP Extensions global entrypoint](https://github.com/openai/mcp-extensions/blob/main/docs/spec.md#global-entrypoint) receives empty arguments and opens `<system Documents>/Cowart/canvas/`. It reuses all existing pages and creates the first page only when none exists. macOS uses `~/Documents`; Windows resolves the system Documents folder, including redirection/OneDrive. Chat calls with `projectDir` still open that project's canvas directly and do not depend on Documents. Global canvas context and each widget follow-up carry the actual storage paths. Tests isolate Documents with `COWART_DOCUMENTS_DIR`. The resource declares fullscreen as its only supported and preferred mode. Pinning and final placement are controlled by the host; inside a conversation, fullscreen can be a content side panel. These capabilities are available from `0.1.30`. Completely quit and restart Codex after installation or updates to load the new navigation entrypoint.
 
 ## Installation
 
@@ -146,6 +149,8 @@ npm run build
 `npm run build` regenerates and validates the self-contained MCP and widget release artifacts under `mcp/generated/`; those files must be committed with the Git release. Before committing source changes, also run `npm run quality`, which includes a cold-start probe with no `node_modules`, a fresh temporary directory, and an npm sentinel that fails if runtime installation is attempted.
 
 `npm run probe:widget:startup` checks the startup scripts in the actual MCP resource and tests host information arriving before the project path, timeouts, cancellation, and bridge failures in an isolated environment. It is included in `npm run quality`. These tests do not replace native Codex UI verification on Windows / macOS.
+
+HTML image, annotation, and slide exports share `src/htmlDraftCapture.js`. Its `src/html2canvasClipFix.js` adapter corrects ancestor clipping being applied before transforms in html2canvas 1.4.1, which could capture only one quarter of a centered, scaled HTML draft. This dependency is pinned; `npm run probe:html:capture` guards the adapter in the quality checks. For browser pixel, scaling, and nested clipping checks, run `npm run probe:html:capture:browser` and open its printed URL. This is a capture-function regression, not native plugin verification.
 
 To diagnose native canvas startup, search the Codex client logs for `[Cowart startup]`. Since 0.1.29, these entries include the version, stage, and elapsed time: `html_loaded`, `bridge_connecting` / `bridge_ready`, `frontend_started`, `tool_result_received`, `storage_target_ready`, `canvas_state_loaded`, and `canvas_mounted`. Ordering can vary with host timing; failures record a corresponding `*_failed`, `*_timeout`, or script error stage. Successful milestones use warning level because Codex 26.928 only captures sandbox warnings and errors; those milestones are not failures. Each stage is logged once, logging stops after the canvas mounts, and paths, canvas content, and raw error messages are excluded.
 

@@ -38,6 +38,7 @@ try {
     platform: "node",
     format: "esm",
     target: "node20",
+    supported: { "template-literal": false },
     charset: "utf8",
     minify: true,
     legalComments: "eof",
@@ -89,6 +90,9 @@ async function buildWidgetArtifact(outDir) {
     await viteBuild({
       root: ROOT_DIR,
       logLevel: "warning",
+      // Keep newlines escaped in bundled string literals so generated JS has no
+      // trailing spaces from third-party multiline diagnostic messages.
+      esbuild: { supported: { "template-literal": false } },
       build: {
         outDir,
         emptyOutDir: true,

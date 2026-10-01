@@ -52,6 +52,8 @@ assert.ok(manifest.name.length <= 64);
 assertOnlyKeys(manifest, pluginFields, "plugin.json");
 assert.equal(manifest.version, codexManifest.version);
 assert.equal(manifest.version, packageManifest.version);
+assert.deepEqual(manifest.extensions?.["com.openai"]?.interface, codexManifest.interface);
+assert.ok(codexManifest.interface.shortDescription.length <= 30);
 
 assert.equal(mcpConfig.$schema, mcpSchema);
 assert.deepEqual(Object.keys(mcpConfig).sort(), ["$schema", "mcpServers"]);

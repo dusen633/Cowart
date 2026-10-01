@@ -32,6 +32,7 @@ import {
   writeCowartViewState,
 } from "./lib/canvas-storage.mjs";
 import { pluginPath } from "./lib/plugin-root.mjs";
+import { resolveLauncherTarget } from "./lib/project-launcher.mjs";
 import { inlineWidget, registerWidgetResource } from "./lib/widget-resource.mjs";
 import {
   COWART_GA4_EVENT_NAMES,
@@ -120,16 +121,24 @@ const projectArgsSchema = {
   canvasDir: z.string().trim().optional(),
 };
 
-const displayModeSchema = z.enum(["fullscreen", "inline"]);
+const displayModeSchema = z.enum(["fullscreen"]);
 
 const pluginManifest = JSON.parse(
   readFileSync(pluginPath(".codex-plugin", "plugin.json"), "utf8"),
 );
+// MCP SDK 1.29 does not forward per-tool icons from registerTool. The Extensions
+// protocol explicitly supports serverInfo.icons as the navigation fallback.
+const sidebarIcons = [{
+  src: `data:image/svg+xml;base64,${readFileSync(pluginPath("assets", "sidebar-icon.svg")).toString("base64")}`,
+  mimeType: "image/svg+xml",
+  sizes: ["any"],
+}];
 
 const server = new McpServer(
   {
     name: pluginManifest.name,
     version: pluginManifest.version,
+    icons: sidebarIcons,
   },
   {
     instructions:
@@ -1061,16 +1070,16 @@ function registerCowartWidget(mcpServer) {
     mcpServer,
     TOOL_RENDER_WIDGET,
     {
-      title: "Render Cowart Canvas Widget",
+      title: "Cowart",
       description:
-        "Open, reopen, or explicitly refresh the native Cowart canvas for the active Codex project. Pass projectDir for the user's workspace so canvas data is stored under <projectDir>/canvas. A successful call creates a widget surface, so do not use this tool as a routine prerequisite when a Cowart canvas is already open.",
+        "Open Cowart fullscreen. In a project conversation, pass the user's active workspace as projectDir to open its canvas directly. Empty arguments (including a sidebar launch) open the single Cowart/canvas workspace in the system Documents folder and create the first page if needed. Reuse an already-open canvas and its supplied projectDir/canvasDir for subsequent work.",
       inputSchema: {
         ...projectArgsSchema,
         title: z.string().trim().optional(),
         displayMode: displayModeSchema.optional(),
       },
       annotations: {
-        readOnlyHint: true,
+        readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: true,
         openWorldHint: false,
@@ -1081,6 +1090,7 @@ function registerCowartWidget(mcpServer) {
           visibility: ["model", "app"],
         },
         "ui/resourceUri": COWART_WIDGET_URI,
+        "openai/ui": { entrypoints: [{ type: "global" }] },
         "openai/outputTemplate": COWART_WIDGET_URI,
         "openai/widgetAccessible": true,
         "openai/toolInvocation/invoking": "Opening Cowart canvas...",
@@ -1088,10 +1098,22 @@ function registerCowartWidget(mcpServer) {
       },
     },
     async (input = {}) => {
-      const { projectDir, canvasDir } = resolveCowartPaths(input);
+      const globalWorkspace = !nonEmptyString(input.projectDir) && !nonEmptyString(input.canvasDir);
+      const target = await resolveLauncherTarget(input);
       const title = nonEmptyString(input.title) || "Cowart Canvas";
       const preferredDisplayMode = normalizeDisplayMode(input.displayMode);
-
+      const widgetData = {
+        version: 1,
+        widget: "cowart-canvas-widget",
+        title,
+        rendering: "native-widget",
+        staticDir: COWART_STATIC_BUILD_DIR,
+        preferredDisplayMode,
+        view: "canvas",
+        ...target,
+        ...(globalWorkspace ? { globalWorkspace: true } : {}),
+        canvasState: await launcherCanvasState(target, { ensurePage: globalWorkspace }),
+      };
       return {
         content: [
           {
@@ -1099,30 +1121,25 @@ function registerCowartWidget(mcpServer) {
             text: "Rendered Cowart canvas widget.",
           },
         ],
-        structuredContent: {
-          version: 1,
-          widget: "cowart-canvas-widget",
-          title,
-          rendering: "native-widget",
-          staticDir: COWART_STATIC_BUILD_DIR,
-          projectDir,
-          canvasDir,
-          preferredDisplayMode,
-        },
+        structuredContent: widgetData,
         _meta: {
           "openai/outputTemplate": COWART_WIDGET_URI,
-          widgetData: {
-            title,
-            rendering: "native-widget",
-            staticDir: COWART_STATIC_BUILD_DIR,
-            projectDir,
-            canvasDir,
-            preferredDisplayMode,
-          },
+          widgetData,
         },
       };
     },
   );
+}
+
+async function launcherCanvasState(target, { ensurePage = false } = {}) {
+  let state = await readCowartCanvasState(target, { hydrateAssets: false });
+  if (ensurePage && !Object.values(state.snapshot?.store || {}).some((record) => record?.typeName === "page")) {
+    const { createCowartSnapshotWithDefaultPage } = await import("../src/canvasSnapshot.js");
+    const saved = await saveCowartCanvasSnapshot(target, createCowartSnapshotWithDefaultPage(state.snapshot));
+    if (!saved.ok) throw new Error("无法创建 Cowart 默认页面。");
+    state = await readCowartCanvasState(target, { hydrateAssets: false });
+  }
+  return { snapshot: state.snapshot, storage: state.storage, viewState: state.viewState };
 }
 
 function registerCowartAnalyticsTools(mcpServer) {
