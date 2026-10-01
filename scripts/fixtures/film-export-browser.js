@@ -2,19 +2,24 @@ import { ALL_FORMATS, AudioBufferSink, BlobSource, Input, VideoSampleSink } from
 import { filmExportDimensions, renderCowartFilmMp4 } from '../../src/filmExport.js'
 
 function assert(condition, message) { if (!condition) throw new Error(message) }
-const fixture = `<!doctype html><html><style>html,body{margin:0;background:white}#blue{position:absolute;left:20px;top:80px;width:50px;height:20px;background:#0000f0}#box{position:absolute;left:20px;top:20px;width:50px;height:50px;background:#f00000}h1{position:absolute;top:100px;font:40px Arial}</style><div id="box"></div><div id="blue"></div><h1 data-cowart-text-id="title">edited hello</h1><script>
+// Half-CSS-pixel lines are distinct only when the capture itself runs at 2x.
+const detail = Array.from({ length: 40 }, (_, i) =>
+  `<div style="position:absolute;left:${i / 2}px;top:0;width:.5px;height:12px;background:${i % 2 ? 'white' : 'black'}"></div>`).join('')
+const fixture = `<!doctype html><html><style>html,body{margin:0;background:white}#blue{position:absolute;left:20px;top:80px;width:50px;height:20px;background:#0000f0}#box{position:absolute;left:20px;top:20px;width:50px;height:50px;background:#f00000}h1{position:absolute;top:100px;font:40px Arial}</style><div style="position:absolute;left:280px;top:10px;width:20px;height:12px">${detail}</div><div id="box"></div><div id="blue"></div><h1 data-cowart-text-id="title">edited hello</h1><script>
 let time=0,playing=false,muted=true;
 const motion=document.getElementById('blue').animate([{transform:'translateX(0px)'},{transform:'translateX(180px)'}],{duration:1000,fill:'both'});motion.pause();
 window.CowartFilm={duration:1,get currentTime(){return time},get playing(){return playing},get muted(){return muted},seek(t){time=t;motion.currentTime=t*1000;document.getElementById('box').style.left=(20+t*180)+'px'},play(){playing=true},pause(){playing=false},setMuted(value){muted=value},renderAudio({sampleRate,numberOfChannels}){const buffer=new AudioBuffer({sampleRate,numberOfChannels,length:sampleRate});for(let c=0;c<numberOfChannels;c++){const data=buffer.getChannelData(c);for(let i=0;i<data.length;i++){const t=i/sampleRate;data[i]=.15*Math.sin(2*Math.PI*440*t)+ (t>.5?.1*Math.sin(2*Math.PI*880*t)*Math.exp(-(t-.5)*12):0)}}return buffer}};
 CowartFilm.seek(0);
 <\/script></html>`
 
-async function inspect(blob, duration, movingBox = false) {
+async function inspect(blob, duration, movingBox = false, expectedSize = [640, 360], checkDetail = false) {
   assert(blob.type === 'video/mp4' && blob.size > 1000, 'must produce a real MP4 blob')
   const input = new Input({ source: new BlobSource(blob), formats: ALL_FORMATS })
   try {
     const video = await input.getPrimaryVideoTrack(), audio = await input.getPrimaryAudioTrack()
     assert(video && audio, 'MP4 must contain both video and audio tracks')
+    const dimensions = [video.displayWidth, video.displayHeight]
+    assert(JSON.stringify(dimensions) === JSON.stringify(expectedSize), 'encoded MP4 must retain its 2x dimensions: ' + dimensions)
     const actual = await input.computeDuration()
     assert(Math.abs(actual - duration) < 0.08, 'MP4 duration must match the timeline')
     let sum = 0, count = 0
@@ -30,6 +35,16 @@ async function inspect(blob, duration, movingBox = false) {
     for (const time of [0, duration * 0.7]) {
       const sample = await sink.getSample(time)
       assert(sample, 'video frame must decode')
+      if (checkDetail) {
+        const native = document.createElement('canvas')
+        native.width = dimensions[0]; native.height = dimensions[1]
+        const nativeContext = native.getContext('2d')
+        sample.draw(nativeContext, 0, 0)
+        const detail = nativeContext.getImageData(564, 24, 32, 1).data
+        const contrast = Array.from({ length: 16 }, (_, i) => detail[(i * 2 + 1) * 4] - detail[i * 2 * 4])
+        assert(contrast.every((value) => value > 100), '2x capture must retain half-CSS-pixel stripes rather than upscale a 1x bitmap: ' + contrast)
+        native.width = native.height = 0
+      }
       sample.draw(context, 0, 0, 320, 180)
       sample.close()
       const pixels = context.getImageData(0, 0, 320, 180).data
@@ -53,7 +68,7 @@ async function inspect(blob, duration, movingBox = false) {
       assert(checksums[1] > checksums[0] + 100, 'seeked object must move to its correct timestamp')
       assert(bluePositions[1] > bluePositions[0] + 100, 'WAAPI animations must preserve their seeked frame during HTML cloning: '+JSON.stringify(bluePositions))
     }
-    return { size: blob.size, duration: actual, rms, frames: checksums, assetPixels, pixelHashes }
+    return { dimensions, size: blob.size, duration: actual, rms, frames: checksums, assetPixels, pixelHashes }
   } finally { input.dispose() }
 }
 
@@ -61,11 +76,16 @@ document.getElementById('run').onclick = async () => {
   const results = [], result = document.getElementById('result')
   try {
     assert(filmExportDimensions(1023, 575).width % 2 === 0, 'H.264 dimensions must be even')
-    assert(filmExportDimensions(4000, 2000).width === 1920, 'large shapes must be bounded')
+    assert(filmExportDimensions(4000, 2000).width === 8000, 'large shapes must retain 2x instead of a 1920 cap')
     const progress = []
     const blob = await renderCowartFilmMp4({ html: fixture, width: 320, height: 180, duration: 1,
       onProgress: (value) => { progress.push(value); result.textContent = 'Fixture: ' + Math.round(value * 100) + '%' } })
-    results.push({ test: 'edited DOM, seeked frames, muted preview still exports music', ...await inspect(blob, 1, true) })
+    results.push({ test: 'edited DOM, seeked frames, muted preview still exports music', ...await inspect(blob, 1, true, [640, 360], true) })
+
+    const landscape = await renderCowartFilmMp4({ html: fixture, width: 1024, height: 576, duration: 1 })
+    results.push({ test: '2x landscape beyond 1920, original composition and audio', ...await inspect(landscape, 1, false, [2048, 1152]) })
+    const portrait = await renderCowartFilmMp4({ html: fixture, width: 180, height: 320, duration: 1 })
+    results.push({ test: '2x portrait aspect ratio and audio', ...await inspect(portrait, 1, false, [360, 640]) })
     assert(progress[0] === 0 && progress.at(-1) === 1 && progress.every((v, i) => !i || v >= progress[i - 1]), 'progress must reach 100% monotonically')
     await fetch('/fixture.mp4', { method: 'POST', body: blob })
     const asynchronous = fixture
@@ -92,14 +112,14 @@ document.getElementById('run').onclick = async () => {
       .replace('<h1 data-cowart-text-id="title">', `<video preload="auto" muted src="${sourceData}" style="position:absolute;left:0;top:0;width:320px;height:180px;object-fit:cover"></video><h1 data-cowart-text-id="title">`)
       .replace('seek(t){time=t;', "seek(t){time=t;document.querySelector('video').pause();document.querySelector('video').currentTime=t;")
     const videoBlob = await renderCowartFilmMp4({ html: videoFixture, width: 320, height: 180, duration: 1 })
-    const videoInfo = await inspect(videoBlob, 1, true)
+    const videoInfo = await inspect(videoBlob, 1, true, [640, 360], true)
     assert(videoInfo.frames.every((x, i) => Math.abs(x - asyncInfo.frames[i]) < 3), 'embedded video must display its exact source time, not a dropped/native playback frame')
     results.push({ test: 'deterministically decoded embedded MP4, video/music retained', ...videoInfo })
     const legacyResponse = await fetch('/legacy.html')
     if (legacyResponse.ok) {
       const legacy = await renderCowartFilmMp4({ html: await legacyResponse.text(), width: 1024, height: 576, duration: 4,
         onProgress: (value) => { result.textContent = 'Legacy: ' + Math.round(value * 100) + '%' } })
-      results.push({ test: 'existing hello film Web Audio graph export', ...await inspect(legacy, 4) })
+      results.push({ test: 'existing hello film Web Audio graph export', ...await inspect(legacy, 4, false, [2048, 1152]) })
       await fetch('/legacy.mp4', { method: 'POST', body: legacy })
     }
     const abort = new AbortController(); abort.abort()

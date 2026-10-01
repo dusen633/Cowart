@@ -3,12 +3,9 @@ import { renderHtmlDraftDocument } from './htmlDraftCapture.js'
 import { COWART_FILM_FPS } from './filmTimeline.js'
 import { prepareFilmAssets, seekFilmFrame, waitForFilmAPI, waitForFilmTask } from './filmFrameReady.js'
 import { createFilmVideoFrames } from './filmVideoFrames.js'
+import { COWART_FILM_EXPORT_PIXEL_RATIO, filmExportDimensions } from './filmExportSize.js'
 
-export function filmExportDimensions(width, height) {
-  if (![width, height].every((n) => Number.isFinite(n) && n > 0)) throw new Error('影片尺寸无效。')
-  const scale = Math.min(1, 1920 / Math.max(width, height))
-  return { width: Math.max(2, Math.round(width * scale / 2) * 2), height: Math.max(2, Math.round(height * scale / 2) * 2) }
-}
+export { filmExportDimensions } from './filmExportSize.js'
 
 // Runs only in an isolated export iframe. Existing score-based films can export
 // their Web Audio graph without recording the desktop or playing audible sound.
@@ -119,7 +116,7 @@ async function createExportFrame(html, width, height, duration, options) {
 export async function renderCowartFilmMp4({ html, width, height, duration, onProgress = () => {}, signal, taskTimeout = 15000 }) {
   if (!Number.isFinite(duration) || duration <= 0 || duration > 120) throw new Error('影片时长必须为 1–120 秒。')
   const size = filmExportDimensions(width, height)
-  const videoQuality = new Quality({ bitrate: 5_000_000 })
+  const videoQuality = new Quality({ bitrate: 5_000_000 * COWART_FILM_EXPORT_PIXEL_RATIO ** 2 })
   const audioQuality = new Quality({ bitrate: 192_000 })
   const options = { signal, timeout: taskTimeout }
   if (!await waitForFilmTask(() => canEncodeVideo('avc', { ...size, frameRate: COWART_FILM_FPS, quality: videoQuality }), options)) {
@@ -159,7 +156,7 @@ export async function renderCowartFilmMp4({ html, width, height, duration, onPro
     checkCanceled()
     await waitForFilmTask(() => film.pause(), options)
     await waitForFilmTask(() => film.setMuted(true), options)
-    videos = createFilmVideoFrames(options)
+    videos = createFilmVideoFrames({ ...options, pixelRatio: COWART_FILM_EXPORT_PIXEL_RATIO })
     const canvas = document.createElement('canvas')
     Object.assign(canvas, size)
     const context = canvas.getContext('2d')
@@ -179,7 +176,7 @@ export async function renderCowartFilmMp4({ html, width, height, duration, onPro
       let frame
       try {
         frame = await waitForFilmTask(() => renderHtmlDraftDocument(iframe.contentDocument, {
-          width, height, pixelRatio: Math.min(size.width / width, size.height / height), freezeAtCurrentFrame: true, videoFrames
+          width, height, pixelRatio: COWART_FILM_EXPORT_PIXEL_RATIO, freezeAtCurrentFrame: true, videoFrames
         }), { ...options, label: '影片帧截图' })
         context.fillStyle = '#fff'
         context.fillRect(0, 0, size.width, size.height)

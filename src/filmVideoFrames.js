@@ -10,8 +10,8 @@ function position(value, space) {
 }
 
 // Mirrors object-fit before HTML capture; never asks <video> to play or decode.
-export function drawFittedVideo(sample, canvas, style) {
-  const { width, height } = canvas
+export function drawFittedVideo(sample, canvas, style, pixelRatio = 1) {
+  const width = canvas.width / pixelRatio, height = canvas.height / pixelRatio
   const sw = sample.displayWidth, sh = sample.displayHeight
   const fit = style.objectFit
   let dw = width, dh = height
@@ -21,11 +21,13 @@ export function drawFittedVideo(sample, canvas, style) {
     dw = sw * scale; dh = sh * scale
   }
   const offsets = (style.objectPosition || '50% 50%').split(/\s+/)
-  sample.draw(canvas.getContext('2d'), position(offsets[0], width - dw), position(offsets[1] || '50%', height - dh), dw, dh)
+  sample.draw(canvas.getContext('2d'), position(offsets[0], width - dw) * pixelRatio,
+    position(offsets[1] || '50%', height - dh) * pixelRatio, dw * pixelRatio, dh * pixelRatio)
 }
 
 export function createFilmVideoFrames(options = {}) {
   const sources = new Map()
+  const pixelRatio = options.pixelRatio ?? 1
   let disposed = false
   async function sourceFor(video) {
     const url = video.currentSrc || video.src || video.querySelector('source')?.src
@@ -71,9 +73,9 @@ export function createFilmVideoFrames(options = {}) {
             // Mediabunny checks the context's realm. Decode/draw in the host
             // realm, then copy the bitmap into the iframe capture clone.
             const canvas = document.createElement('canvas')
-            canvas.width = Math.max(1, video.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight))
-            canvas.height = Math.max(1, video.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom))
-            drawFittedVideo(sample, canvas, style)
+            canvas.width = Math.max(1, Math.round((video.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)) * pixelRatio))
+            canvas.height = Math.max(1, Math.round((video.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)) * pixelRatio))
+            drawFittedVideo(sample, canvas, style, pixelRatio)
             frames.set(video, canvas)
           } finally { sample.close() }
         }
