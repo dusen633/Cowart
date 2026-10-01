@@ -61,13 +61,18 @@ import {
 import { getAssetUrlsByImport } from '@tldraw/assets/imports.vite'
 import { AllSelection } from '@tiptap/pm/state'
 import { renderHtmlDraftDocument } from './htmlDraftCapture.js'
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Download, FileCode, Image as ImageIcon, Play, X } from 'lucide-react'
+import { attachCowartFilmController } from './filmPlayback.js'
+import { renderCowartFilmMp4 } from './filmExport.js'
+import { getFilmOptions, buildFilmGenerationPrompt } from './filmConfig.js'
+import { FilmStyleButtons } from './FilmStyleButtons.jsx'
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Download, FileCode, Film, Image as ImageIcon, Pause, Play, Volume2, VolumeX, X } from 'lucide-react'
 import 'tldraw/tldraw.css'
 import { reportCowartStartup } from './widgetStartup.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import aiHtmlToolIconRaw from './assets/ai-html.svg?raw'
 import aiImageToolIconRaw from './assets/ai-image.svg?raw'
 import aiSlidesToolIconRaw from './assets/ai-slides.svg?raw'
+import aiFilmToolIconRaw from './assets/ai-film.svg?raw'
 import annotationToolIconRaw from './assets/tool-comment.svg?raw'
 import {
   sendTrackedWidgetMessage,
@@ -101,6 +106,9 @@ const AI_IMAGE_TOOL_ID = 'ai-image'
 const AI_IMAGE_HOLDER_LABEL = 'AI 图片'
 const AI_DRAFT_TOOL_ID = 'ai-draft'
 const AI_DRAFT_HOLDER_LABEL = 'AI HTML'
+const AI_FILM_TOOL_ID = 'ai-film'
+const AI_FILM_LABEL = 'AI 影片'
+const COWART_FILM_STATUS_EVENT = 'cowart:film-status'
 const AI_SLIDES_TOOL_ID = 'ai-slides'
 const AI_SLIDES_LABEL = 'AI Slides'
 const AI_SLIDES_PRESENT_LABEL = '演示 Slides'
@@ -277,6 +285,14 @@ const aiHtmlToolIcon = (
     dangerouslySetInnerHTML={{ __html: aiHtmlToolIconSvg }}
   />
 )
+const aiFilmToolIconSvg = aiFilmToolIconRaw.replaceAll('black', 'currentColor')
+const aiFilmToolIcon = (
+  <div
+    aria-hidden="true"
+    className="cowart-ai-frame-tool-icon"
+    dangerouslySetInnerHTML={{ __html: aiFilmToolIconSvg }}
+  />
+)
 const aiSlidesToolIconSvg = aiSlidesToolIconRaw.replaceAll('black', 'currentColor')
 const aiSlidesToolIcon = (
   <div
@@ -301,6 +317,8 @@ const cowartAssetObjectUrlCache = new Map()
 const cowartAssetSourceKeys = new Map()
 const cowartHtmlDraftIframes = new Map()
 const cowartHtmlDraftDomEditSessions = new Map()
+const cowartFilmControllers = new Map()
+const cowartFilmStatuses = new Map()
 const cowartPendingSlidesPastes = new WeakMap()
 const cowartCopiedContent = new WeakMap()
 
@@ -556,6 +574,14 @@ function isAiDraftHolderShape(shape) {
   return shape?.type === 'frame' && shape.meta?.cowartAiDraftHolder === true
 }
 
+function isAiFilmHolderShape(shape) {
+  return isAiDraftHolderShape(shape) && shape.meta?.cowartAiFilmHolder === true
+}
+
+function isCowartFilmShape(shape) {
+  return isCowartHtmlDraftEmbedShape(shape) && shape.meta?.cowartFilm === true
+}
+
 function isAiSlidesShape(shape) {
   return shape?.type === 'frame' && shape.meta?.cowartAiSlides === true
 }
@@ -724,6 +750,26 @@ function createAiDraftHolderAtViewportCenter(editor) {
   editor.setCurrentTool('select.idle')
 }
 
+function createAiFilmHolderShape(editor, id, shapeOverrides = {}) {
+  const { meta, props, ...rest } = shapeOverrides
+  return createAiDraftHolderShape(editor, id, {
+    ...rest,
+    meta: { cowartAiFilmHolder: true, cowartFilmStyle: 'product-launch', cowartFilmDuration: 15, cowartFilmMuted: false, ...meta },
+    props: { name: AI_FILM_LABEL, ...props }
+  })
+}
+
+function createAiFilmHolderAtViewportCenter(editor) {
+  const scale = editor.getResizeScaleFactor()
+  const w = AI_DRAFT_HOLDER_DEFAULT_W * scale
+  const h = AI_DRAFT_HOLDER_DEFAULT_H * scale
+  const center = editor.getViewportPageBounds().center
+  const id = createShapeId()
+  createAiFilmHolderShape(editor, id, { x: center.x - w / 2, y: center.y - h / 2, props: { w, h } })
+  editor.select(id)
+  editor.setCurrentTool('select.idle')
+}
+
 function createAiSlidesShape(editor, id, shapeOverrides = {}) {
   const scale = editor.getResizeScaleFactor()
   const { meta, props, ...shapeRecordOverrides } = shapeOverrides
@@ -843,11 +889,11 @@ function adoptGeneratedAiSlidesItems(editor) {
 function normalizeAiDraftHolderLabels(editor) {
   const updates = editor
     .getCurrentPageShapes()
-    .filter((shape) => isAiDraftHolderShape(shape) && shape.props?.name !== AI_DRAFT_HOLDER_LABEL)
+    .filter((shape) => isAiDraftHolderShape(shape) && shape.props?.name !== (isAiFilmHolderShape(shape) ? AI_FILM_LABEL : AI_DRAFT_HOLDER_LABEL))
     .map((shape) => ({
       id: shape.id,
       type: shape.type,
-      props: { name: AI_DRAFT_HOLDER_LABEL }
+      props: { name: isAiFilmHolderShape(shape) ? AI_FILM_LABEL : AI_DRAFT_HOLDER_LABEL }
     }))
 
   if (updates.length) editor.updateShapes(updates)
@@ -1998,7 +2044,8 @@ async function downloadCowartImageShape(editor, imageShape) {
 async function exportCowartHtmlDraft(editor, draftShapeId, format) {
   const shape = editor.getShape(draftShapeId)
   if (format === 'html') {
-    const htmlContent = await readCowartHtmlDraftContent(shape)
+    const source = await readCowartHtmlDraftContent(shape)
+    const htmlContent = isCowartFilmShape(shape) ? await hydrateCowartHtmlDraftLocalImages(source) : source
     const fileName = htmlDraftExportFileName(shape, 'html')
     const dataUrl = textDataUrl(htmlContent, 'text/html')
     if (hasCowartWidgetBridge()) {
@@ -2023,6 +2070,31 @@ async function exportCowartHtmlDraft(editor, draftShapeId, format) {
   }
 
   downloadDataUrl(exportResult.url, fileName)
+  return { fileName }
+}
+
+async function exportCowartFilm(editor, draftShapeId, onProgress, signal) {
+  const shape = editor.getShape(draftShapeId)
+  if (!isCowartFilmShape(shape)) throw new Error('请选择 AI 影片。')
+  // A separate iframe renders from zero without changing the preview or edits.
+  const html = await hydrateCowartHtmlDraftLocalImages(await readCowartHtmlDraftContent(shape))
+  const blob = await renderCowartFilmMp4({ html, width: Number(shape.props.w), height: Number(shape.props.h),
+    duration: getFilmOptions(shape).duration, onProgress, signal })
+  signal?.throwIfAborted()
+  const fileName = htmlDraftExportFileName(shape, 'mp4')
+  if (hasCowartWidgetBridge()) {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result)
+      reader.onerror = () => reject(reader.error)
+      reader.readAsDataURL(blob)
+    })
+    signal?.throwIfAborted()
+    return downloadCowartFile({ dataUrl, fileName, mimeType: 'video/mp4' })
+  }
+  const url = URL.createObjectURL(blob)
+  downloadDataUrl(url, fileName)
+  window.setTimeout(() => URL.revokeObjectURL(url), 60000)
   return { fileName }
 }
 
@@ -2509,7 +2581,7 @@ function formatAiImageGenerationTarget(shape) {
   }
 }
 
-function getAiImageGenerationPanelLayout(editor, shapeId) {
+function getAiImageGenerationPanelLayout(editor, shapeId, panelHeight = AI_IMAGE_GENERATION_PANEL_ESTIMATED_H) {
   const bounds = editor.getShapePageBounds(shapeId)
   if (!bounds) return null
 
@@ -2530,11 +2602,13 @@ function getAiImageGenerationPanelLayout(editor, shapeId) {
     AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN,
     Math.max(AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN, viewportWidth - panelWidth - AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN)
   )
+  // The taller film panel must clear the fixed bottom tool palette.
+  const bottomMargin = panelHeight > AI_IMAGE_GENERATION_PANEL_ESTIMATED_H ? 88 : AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN
   const preferredTop = bottomLeft.y + AI_IMAGE_GENERATION_PANEL_OFFSET
   const panelTop = clampNumber(
     preferredTop,
     AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN,
-    Math.max(AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN, viewportHeight - AI_IMAGE_GENERATION_PANEL_ESTIMATED_H - AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN)
+    Math.max(AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN, viewportHeight - panelHeight - bottomMargin)
   )
 
   return {
@@ -2611,6 +2685,18 @@ function buildAiDraftGenerationPrompt({ holderShape, userPrompt, references, ref
     'Prompt:',
     userPrompt.trim()
   ].join('\n')
+}
+
+function buildAiFilmGenerationPrompt({ holderShape, userPrompt, references, referenceAttached }) {
+  const target = formatAiImageGenerationTarget(holderShape)
+  return buildFilmGenerationPrompt({
+    holderShape,
+    userPrompt,
+    target,
+    referenceLines: aiImageReferenceLines({ references, referenceAttached }),
+    canvasContext: window.openai?.toolOutput || {},
+    alreadyOpenLine: COWART_WIDGET_ALREADY_OPEN_PROMPT_LINE
+  })
 }
 
 function buildAiSlidesGenerationPrompt({ slidesShape, pageCount, userPrompt, references, referenceAttached }) {
@@ -2760,7 +2846,7 @@ async function sendAiDraftGenerationRequest({ holderShape, userPrompt, reference
     references.push({ file: referenceFile, dataUrl: referenceDataUrl, savedReference })
   }
 
-  const prompt = buildAiDraftGenerationPrompt({
+  const prompt = (isAiFilmHolderShape(holderShape) ? buildAiFilmGenerationPrompt : buildAiDraftGenerationPrompt)({
     holderShape,
     userPrompt,
     references,
@@ -2783,8 +2869,8 @@ async function sendAiDraftGenerationRequest({ holderShape, userPrompt, reference
   return sender(
     { prompt, content },
     {
-      promptType: 'ai_html',
-      aiType: 'html',
+      promptType: isAiFilmHolderShape(holderShape) ? 'ai_film' : 'ai_html',
+      aiType: isAiFilmHolderShape(holderShape) ? 'film' : 'html',
       hasReference: imageReferences.length > 0
     }
   )
@@ -3112,6 +3198,35 @@ function CowartHtmlDraftEmbed({ shape }) {
     }
   }, [directHtmlUrl, draftAssetUrl])
 
+  useEffect(() => {
+    if (!isCowartFilmShape(shape) || !htmlSource || !frameLoadVersion) return undefined
+    const iframe = cowartHtmlDraftIframes.get(shape.id)
+    if (!iframe?.contentDocument?.body) return undefined
+    const options = getFilmOptions(shape)
+    const controller = attachCowartFilmController(iframe, {
+      duration: options.duration,
+      muted: options.muted,
+      onStatus(status) {
+        cowartFilmStatuses.set(shape.id, status)
+        window.dispatchEvent(new CustomEvent(COWART_FILM_STATUS_EVENT, { detail: { shapeId: shape.id, status } }))
+      }
+    })
+    cowartFilmControllers.set(shape.id, controller)
+    return () => {
+      controller.dispose()
+      if (cowartFilmControllers.get(shape.id) === controller) cowartFilmControllers.delete(shape.id)
+      cowartFilmStatuses.delete(shape.id)
+    }
+  }, [shape.id, shape.meta?.cowartFilm, htmlSource, frameLoadVersion])
+
+  useEffect(() => {
+    if (!isCowartFilmShape(shape)) return
+    const muted = shape.meta?.cowartFilmMuted === true
+    if (cowartFilmStatuses.get(shape.id)?.muted !== muted) {
+      cowartFilmControllers.get(shape.id)?.command('mute', muted)
+    }
+  }, [shape.id, shape.meta?.cowartFilm, shape.meta?.cowartFilmMuted, frameLoadVersion])
+
   const persistDomEdits = useCallback(
     async (htmlContent) => {
       const result = await updateCowartHtmlDraft({ draftShapeId: shape.id, htmlContent })
@@ -3164,7 +3279,7 @@ function CowartHtmlDraftEmbed({ shape }) {
   }, [exitDomEditing, frameLoadVersion, htmlSource, isEditing, persistDomEdits, shape.id])
 
   return (
-    <HTMLContainer className="cowart-html-draft-container" id={shape.id}>
+    <HTMLContainer className={`cowart-html-draft-container${isCowartFilmShape(shape) ? ' cowart-film-container' : ''}`} id={shape.id}>
       {htmlSource ? (
         <iframe
           ref={handleIframeRef}
@@ -3178,7 +3293,8 @@ function CowartHtmlDraftEmbed({ shape }) {
           sandbox="allow-forms allow-popups allow-same-origin allow-scripts"
           srcDoc={htmlSource}
           tabIndex={isEditing ? 0 : -1}
-          title={AI_DRAFT_HOLDER_LABEL}
+          title={isCowartFilmShape(shape) ? AI_FILM_LABEL : AI_DRAFT_HOLDER_LABEL}
+          allow={isCowartFilmShape(shape) ? "autoplay" : undefined}
           width={toDomPrecision(shape.props.w)}
           style={{
             pointerEvents: isEditing ? 'auto' : 'none',
@@ -3195,6 +3311,9 @@ function CowartHtmlDraftEmbed({ shape }) {
         >
           <span>{loadError || 'HTML 草稿加载中'}</span>
         </div>
+      )}
+      {isCowartFilmShape(shape) && (
+        <CowartFilmPlaybackControls draftShapeId={shape.id} isEditing={isEditing} isLocked={shape.isLocked} />
       )}
     </HTMLContainer>
   )
@@ -3310,12 +3429,14 @@ const cowartUiOverrides = {
     en: {
       'tool.ai-image': AI_IMAGE_HOLDER_LABEL,
       'tool.ai-draft': AI_DRAFT_HOLDER_LABEL,
+      'tool.ai-film': AI_FILM_LABEL,
       'tool.ai-slides': AI_SLIDES_LABEL,
       'tool.cowart-annotation': ANNOTATION_TOOL_LABEL
     },
     'zh-cn': {
       'tool.ai-image': AI_IMAGE_HOLDER_LABEL,
       'tool.ai-draft': AI_DRAFT_HOLDER_LABEL,
+      'tool.ai-film': AI_FILM_LABEL,
       'tool.ai-slides': AI_SLIDES_LABEL,
       'tool.cowart-annotation': ANNOTATION_TOOL_LABEL
     }
@@ -3375,6 +3496,22 @@ const cowartUiOverrides = {
         meta: {
           cowartTool: 'ai-draft-holder'
         }
+      },
+      [AI_FILM_TOOL_ID]: {
+        id: AI_FILM_TOOL_ID,
+        label: 'tool.ai-film',
+        icon: aiFilmToolIcon,
+        onSelect() { createAiFilmHolderAtViewportCenter(editor) },
+        onDragStart(source, info) {
+          const scale = editor.getResizeScaleFactor()
+          onDragFromToolbarToCreateShape(editor, info, {
+            createShape: (id) => createAiFilmHolderShape(editor, id, {
+              props: { w: AI_DRAFT_HOLDER_DEFAULT_W * scale, h: AI_DRAFT_HOLDER_DEFAULT_H * scale }
+            }),
+            onDragEnd: (id) => editor.select(id)
+          })
+        },
+        meta: { cowartTool: 'ai-film-holder' }
       },
       [AI_SLIDES_TOOL_ID]: {
         id: AI_SLIDES_TOOL_ID,
@@ -4027,7 +4164,7 @@ function CowartAiImageGenerationPanel() {
     setErrorMessage('')
     try {
       await sendAiImageGenerationRequest({
-        holderShape: shape,
+        holderShape: editor.getShape(shape.id) || shape,
         userPrompt: promptValue,
         referenceFiles
       })
@@ -4175,7 +4312,7 @@ function CowartAiDraftGenerationPanel() {
       editor.getCamera()
       editor.getViewportScreenBounds()
 
-      const layout = getAiImageGenerationPanelLayout(editor, shape.id)
+      const layout = getAiImageGenerationPanelLayout(editor, shape.id, isAiFilmHolderShape(shape) ? 320 : undefined)
       if (!layout) return null
 
       return {
@@ -4195,7 +4332,11 @@ function CowartAiDraftGenerationPanel() {
   useEffect(() => {
     setStatus('idle')
     setErrorMessage('')
-  }, [selectedTarget?.shape.id])
+    const holder = selectedTarget ? editor.getShape(selectedTarget.shape.id) : null
+    if (isAiFilmHolderShape(holder) && holder.meta?.cowartFilmMuted === true) {
+      editor.updateShape({ id: holder.id, type: 'frame', meta: { ...holder.meta, cowartFilmMuted: false } })
+    }
+  }, [editor, selectedTarget?.shape.id])
 
   useEffect(() => {
     if (status !== 'sent') return undefined
@@ -4218,6 +4359,7 @@ function CowartAiDraftGenerationPanel() {
   if (!selectedTarget) return null
 
   const { shape, layout } = selectedTarget
+  const isFilm = isAiFilmHolderShape(shape)
   const canSend = promptValue.trim().length > 0 || referenceFiles.length > 0
   const isSending = status === 'sending'
 
@@ -4278,8 +4420,11 @@ function CowartAiDraftGenerationPanel() {
     setStatus('sending')
     setErrorMessage('')
     try {
+      const saved = await saveCowartCanvasSnapshot(editor.store.getStoreSnapshot(), { protectImageRecords: true })
+      if (saved?.ok === false) throw new Error(saved.message || '画布保存失败。')
+      await saveCowartSelectionState(getCowartSelectionSnapshot(editor))
       await sendAiDraftGenerationRequest({
-        holderShape: shape,
+        holderShape: editor.getShape(shape.id) || shape,
         userPrompt: promptValue,
         referenceFiles
       })
@@ -4330,8 +4475,8 @@ function CowartAiDraftGenerationPanel() {
   return (
     <div className="cowart-ai-generation-overlay" aria-hidden={false}>
       <form
-        aria-label="AI HTML 生成"
-        className="cowart-ai-generation-panel"
+        aria-label={isFilm ? "AI 影片生成" : "AI HTML 生成"}
+        className={`cowart-ai-generation-panel${isFilm ? " cowart-ai-film-generation-panel" : ""}`}
         data-status={status}
         onClick={stopEditorOverlayEvent}
         onDoubleClick={stopEditorOverlayEvent}
@@ -4376,6 +4521,8 @@ function CowartAiDraftGenerationPanel() {
           />
         </div>
 
+        {isFilm && <CowartFilmGenerationOptions shape={shape} disabled={isSending} />}
+
         <textarea
           aria-label="自定义 prompt"
           className="cowart-ai-generation-prompt"
@@ -4389,21 +4536,24 @@ function CowartAiDraftGenerationPanel() {
           }}
           onKeyDown={handlePromptKeyDown}
           onPaste={handlePromptPaste}
-          placeholder="描述你想生成的 HTML"
+          placeholder={isFilm ? "描述影片内容、镜头和节奏，默认 15 秒" : "描述你想生成的 HTML"}
           rows={3}
           value={promptValue}
         />
 
         <div className="cowart-ai-generation-footer">
-          <div className="cowart-ai-generation-status" aria-live="polite">
-            {status === 'sending'
-              ? '正在发送'
-              : status === 'sent'
-                ? '已发送'
-                : errorMessage}
+          <div className="cowart-ai-generation-footer-start">
+            {isFilm && <CowartFilmGenerationOptions shape={shape} disabled={isSending} section="duration" />}
+            <div className="cowart-ai-generation-status" aria-live="polite">
+              {status === 'sending'
+                ? '正在发送'
+                : status === 'sent'
+                  ? '已发送'
+                  : errorMessage}
+            </div>
           </div>
           <button
-            aria-label="发送草稿请求"
+            aria-label={isFilm ? "发送影片生成请求" : "发送草稿请求"}
             className="cowart-ai-generation-send"
             disabled={!canSend || isSending}
             type="submit"
@@ -4413,6 +4563,39 @@ function CowartAiDraftGenerationPanel() {
         </div>
       </form>
     </div>
+  )
+}
+
+function CowartFilmGenerationOptions({ shape, disabled, section = 'style' }) {
+  const editor = useEditor()
+  const { style, duration } = getFilmOptions(shape)
+  function updateOptions(patch) {
+    const current = editor.getShape(shape.id)
+    if (!current || disabled) return
+    editor.markHistoryStoppingPoint('film-generation-options')
+    editor.updateShape({ id: shape.id, type: 'frame', meta: { ...current.meta, ...patch } })
+  }
+  if (section === 'duration') {
+    return (
+      <div className="cowart-film-options-row">
+        <label>时长
+          <input aria-label="影片时长（秒）" disabled={disabled} type="number" min="1" max="120" step="1"
+            defaultValue={duration} key={`${shape.id}-${duration}`}
+            onBlur={(event) => {
+              const value = Number(event.target.value)
+              const next = Number.isFinite(value) && value > 0 ? Math.min(120, Math.max(1, Math.round(value))) : duration
+              event.target.value = String(next)
+              updateOptions({ cowartFilmDuration: next })
+            }}
+            onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } }} />
+          秒
+        </label>
+      </div>
+    )
+  }
+  return (
+    <FilmStyleButtons styleId={style.id} disabled={disabled}
+      onChange={(styleId) => updateOptions({ cowartFilmStyle: styleId })} />
   )
 }
 
@@ -4786,7 +4969,7 @@ function CowartAiImageStyleControls() {
         id: selectedAiHolderShape.id,
         type: 'frame',
         meta: {
-          ...selectedAiHolderShape.meta,
+          ...editor.getShape(selectedAiHolderShape.id)?.meta,
           cowartAiAspectRatio: w / h
         },
         props: { w, h }
@@ -4802,7 +4985,7 @@ function CowartAiImageStyleControls() {
         id: selectedAiHolderShape.id,
         type: 'frame',
         meta: {
-          ...selectedAiHolderShape.meta,
+          ...editor.getShape(selectedAiHolderShape.id)?.meta,
           cowartAiAspectLocked: nextIsLocked,
           cowartAiAspectRatio: currentRatio
         }
@@ -4966,21 +5149,27 @@ function CowartSelectionToolbar() {
   }
 
   if (htmlDraftShapeId) {
-    return <CowartHtmlDraftToolbar draftShapeId={htmlDraftShapeId} />
+    return <CowartHtmlDraftToolbar key={htmlDraftShapeId} draftShapeId={htmlDraftShapeId} />
   }
 
   return <CowartImageToolbar />
 }
 
-function CowartExportMenu({ disabled = false, onExportHtml, onExportImage, targetKey }) {
+function CowartExportMenu({ disabled = false, onExportHtml, onExportImage, onExportFilm, targetKey }) {
   const editor = useEditor()
   const menuRef = useRef(null)
   const [isOpen, setIsOpen] = useState(false)
   const [status, setStatus] = useState('idle')
+  const [progress, setProgress] = useState(null)
+  const [exportError, setExportError] = useState(null)
+  const exportAbortRef = useRef(null)
 
   useEffect(() => {
     setIsOpen(false)
     setStatus('idle')
+    setProgress(null)
+    setExportError(null)
+    return () => exportAbortRef.current?.abort()
   }, [targetKey])
 
   useEffect(() => {
@@ -5001,7 +5190,7 @@ function CowartExportMenu({ disabled = false, onExportHtml, onExportImage, targe
   }, [editor, isOpen])
 
   useEffect(() => {
-    if (status === 'idle' || status === 'sending') return undefined
+    if (status !== 'sent') return undefined
     const timer = window.setTimeout(() => setStatus('idle'), ANNOTATION_EDIT_STATUS_RESET_MS)
     return () => window.clearTimeout(timer)
   }, [status])
@@ -5010,21 +5199,30 @@ function CowartExportMenu({ disabled = false, onExportHtml, onExportImage, targe
     if (disabled || status === 'sending') return
     setIsOpen(false)
     setStatus('sending')
+    setProgress(null)
+    setExportError(null)
+    const controller = new AbortController()
+    exportAbortRef.current = controller
     try {
-      await exporter()
+      await exporter(setProgress, controller.signal)
+      if (controller.signal.aborted) return
       setStatus('sent')
     } catch (error) {
+      if (controller.signal.aborted) return
       console.error(error)
+      setExportError(error instanceof Error ? error.message : '导出失败，请重试')
       setStatus('error')
+    } finally {
+      if (exportAbortRef.current === controller) exportAbortRef.current = null
     }
   }
 
   const title = status === 'sending'
-    ? '正在导出'
+    ? progress === null ? '正在导出' : `正在渲染影片 ${Math.round(progress * 100)}%`
     : status === 'sent'
       ? '导出完成'
       : status === 'error'
-        ? '导出失败，请重试'
+        ? exportError || '导出失败，请重试'
         : COWART_EXPORT_LABEL
 
   return (
@@ -5046,12 +5244,19 @@ function CowartExportMenu({ disabled = false, onExportHtml, onExportImage, targe
         ) : (
           <Download aria-hidden="true" size={16} strokeWidth={2} />
         )}
-        <span className="cowart-slides-toolbar-label">{COWART_EXPORT_LABEL}</span>
+        <span className="cowart-slides-toolbar-label">{status === 'sending' ? title : COWART_EXPORT_LABEL}</span>
         <ChevronDown aria-hidden="true" className="cowart-export-chevron" size={13} strokeWidth={2} />
       </TldrawUiToolbarButton>
       {isOpen && (
         <div aria-label="导出格式" className="cowart-ai-slides-page-count-popover cowart-export-popover" role="menu">
-          <button
+          {onExportFilm && <button
+            className="cowart-ai-slides-page-count-option"
+            onClick={() => handleExport(onExportFilm)} role="menuitem" type="button"
+          >
+            <Film aria-hidden="true" className="is-visible" size={14} strokeWidth={2} />
+            <span>导出为影片</span>
+          </button>}
+          {onExportImage && <button
             className="cowart-ai-slides-page-count-option"
             onClick={() => handleExport(onExportImage)}
             role="menuitem"
@@ -5059,7 +5264,7 @@ function CowartExportMenu({ disabled = false, onExportHtml, onExportImage, targe
           >
             <ImageIcon aria-hidden="true" className="is-visible" size={14} strokeWidth={2} />
             <span>{COWART_EXPORT_IMAGE_LABEL}</span>
-          </button>
+          </button>}
           <button
             className="cowart-ai-slides-page-count-option"
             onClick={() => handleExport(onExportHtml)}
@@ -5071,6 +5276,7 @@ function CowartExportMenu({ disabled = false, onExportHtml, onExportImage, targe
           </button>
         </div>
       )}
+      {status === 'error' && exportError && <div className="cowart-export-error" role="alert">{exportError}</div>}
     </div>
   )
 }
@@ -5185,6 +5391,7 @@ function CowartSlidesAnnotationEditButton({ slidesShapeId }) {
 
 function CowartHtmlDraftToolbar({ draftShapeId }) {
   const editor = useEditor()
+  const isFilm = useValue('cowart selected film', () => isCowartFilmShape(editor.getShape(draftShapeId)), [editor, draftShapeId])
   const showToolbar = useValue(
     'cowart show html draft toolbar',
     () => editor.isInAny('select.idle', 'select.pointing_shape', 'select.editing_shape'),
@@ -5212,17 +5419,18 @@ function CowartHtmlDraftToolbar({ draftShapeId }) {
     <TldrawUiContextualToolbar
       className="tlui-media__toolbar tlui-image__toolbar cowart-html-draft__toolbar"
       getSelectionBounds={getSelectionBounds}
-      label="AI HTML 工具栏"
+      label={isFilm ? "AI 影片工具栏" : "AI HTML 工具栏"}
     >
       {!isDomEditing && (
         <CowartExportMenu
           onExportHtml={() => exportCowartHtmlDraft(editor, draftShapeId, 'html')}
-          onExportImage={() => exportCowartHtmlDraft(editor, draftShapeId, 'image')}
+          onExportFilm={isFilm ? (onProgress, signal) => exportCowartFilm(editor, draftShapeId, onProgress, signal) : undefined}
+          onExportImage={isFilm ? undefined : () => exportCowartHtmlDraft(editor, draftShapeId, 'image')}
           targetKey={`html-${draftShapeId}`}
         />
       )}
       <CowartHtmlDraftDomEditButton draftShapeId={draftShapeId} isEditing={isDomEditing} />
-      {!isDomEditing && (
+      {!isDomEditing && !isFilm && (
         <>
           <CowartHtmlDraftToolbarButton
             action="edit"
@@ -5245,6 +5453,56 @@ function CowartHtmlDraftToolbar({ draftShapeId }) {
   )
 }
 
+function CowartFilmPlaybackControls({ draftShapeId, isEditing, isLocked = false }) {
+  const editor = useEditor()
+  const [status, setStatus] = useState(() => cowartFilmStatuses.get(draftShapeId) || {
+    ...getFilmOptions(editor.getShape(draftShapeId)), currentTime: 0, playing: false, ready: false
+  })
+  useEffect(() => {
+    function receive(event) {
+      if (event.detail?.shapeId === draftShapeId) setStatus(event.detail.status)
+    }
+    window.addEventListener(COWART_FILM_STATUS_EVENT, receive)
+    const current = cowartFilmStatuses.get(draftShapeId)
+    if (current) setStatus(current)
+    return () => window.removeEventListener(COWART_FILM_STATUS_EVENT, receive)
+  }, [draftShapeId])
+  useEffect(() => {
+    if (isEditing) cowartFilmControllers.get(draftShapeId)?.command('pause')
+  }, [draftShapeId, isEditing])
+  function command(name, value) {
+    cowartFilmControllers.get(draftShapeId)?.command(name, value)
+    if (name === 'mute') {
+      const shape = editor.getShape(draftShapeId)
+      if (shape && shape.meta?.cowartFilmMuted !== value) {
+        editor.markHistoryStoppingPoint('toggle-film-mute')
+        editor.updateShape({ id: shape.id, type: 'embed', meta: { ...shape.meta, cowartFilmMuted: value } })
+      }
+    }
+  }
+  function formatTime(value) {
+    const seconds = Math.floor(Number(value) || 0)
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+  }
+  return (
+    <div className="cowart-film-playback" onPointerDown={stopEditorOverlayEvent} onKeyDown={stopEditorOverlayEvent}>
+      <button aria-label={status.playing ? '暂停影片' : '播放影片'} title={status.error || (status.playing ? '暂停影片' : '播放影片')}
+        disabled={!status.ready || isEditing || isLocked} onClick={() => command(status.playing ? 'pause' : 'play')} type="button">
+        {status.playing ? <Pause size={18} /> : <Play size={18} />}
+      </button>
+      <input aria-label="影片进度" className="cowart-film-progress" type="range" min="0" max={status.duration || 15}
+        step="any" value={status.currentTime || 0} disabled={!status.ready || isEditing || isLocked}
+        onChange={(event) => command('seek', Number(event.target.value))} />
+      <span className="cowart-film-time">{formatTime(status.currentTime)} / {formatTime(status.duration)}</span>
+      <button aria-label={status.muted ? '取消静音' : '静音影片'} aria-pressed={status.muted} disabled={!status.ready || isEditing || isLocked}
+        onClick={() => command('mute', !status.muted)} type="button">
+        {status.muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+      </button>
+      {status.error && <span className="cowart-film-playback-error" role="status">{status.error}</span>}
+    </div>
+  )
+}
+
 function CowartHtmlDraftDomEditButton({ draftShapeId, isEditing }) {
   const editor = useEditor()
   const [status, setStatus] = useState('idle')
@@ -5257,6 +5515,7 @@ function CowartHtmlDraftDomEditButton({ draftShapeId, isEditing }) {
   async function handleClick() {
     if (status === 'saving') return
     if (!isEditing) {
+      cowartFilmControllers.get(draftShapeId)?.command('pause')
       editor.setEditingShape(draftShapeId)
       editor.setCurrentTool('select.editing_shape')
       window.requestAnimationFrame(() => cowartHtmlDraftIframes.get(draftShapeId)?.focus())
@@ -5699,13 +5958,14 @@ function CowartToolbarDivider() {
 
 function CowartToolbar(props) {
   return (
-    <DefaultToolbar {...props} maxItems={11}>
+    <DefaultToolbar {...props} maxItems={12}>
       <CowartAnnotationToolbarItem />
       <CowartToolbarDivider />
       <SelectToolbarItem />
       <HandToolbarItem />
       <CowartToolbarItem toolId={AI_IMAGE_TOOL_ID} />
       <CowartToolbarItem toolId={AI_DRAFT_TOOL_ID} />
+      <CowartToolbarItem toolId={AI_FILM_TOOL_ID} />
       <CowartToolbarItem toolId={AI_SLIDES_TOOL_ID} />
       <CowartToolbarDivider />
       <AssetToolbarItem />
@@ -5753,6 +6013,8 @@ function getCowartSelection(editor) {
       meta: shape?.meta ?? null,
       isAiImageHolder: shape?.meta?.cowartAiImageHolder === true,
       isAiDraftHolder: shape?.meta?.cowartAiDraftHolder === true,
+      isAiFilmHolder: isAiFilmHolderShape(shape),
+      isFilm: isCowartFilmShape(shape),
       isAiSlides: shape?.meta?.cowartAiSlides === true,
       isHtmlDraft: isCowartHtmlDraftEmbedShape(shape),
       props: shape?.props ?? null,
@@ -5860,6 +6122,8 @@ export default function App() {
     window.__cowartEditor = editor
     window.__cowartSelection = () => getCowartSelection(editor)
     window.__cowartViewState = () => getCowartViewState(editor)
+    let isDisposed = false
+    let lastWrittenSelectionState = ''
     let lastSyncedSelectionState = ''
     let isSelectionStateSaving = false
     let hasPendingSelectionState = false
@@ -5873,11 +6137,12 @@ export default function App() {
 
     async function syncSelectionState() {
       const selectionSnapshot = getCowartSelectionSnapshot(editor)
-      writeCowartSelectionState(selectionSnapshot)
-
       const selectionState = JSON.stringify(selectionSnapshot)
+      if (selectionState !== lastWrittenSelectionState) {
+        writeCowartSelectionState(selectionSnapshot)
+        lastWrittenSelectionState = selectionState
+      }
       if (selectionState === lastSyncedSelectionState) return
-      lastSyncedSelectionState = selectionState
 
       if (isSelectionStateSaving) {
         hasPendingSelectionState = true
@@ -5890,6 +6155,7 @@ export default function App() {
           ...selectionSnapshot,
           updatedAt: new Date().toISOString()
         })
+        lastSyncedSelectionState = selectionState
       } catch (error) {
         console.error(error)
       } finally {
@@ -5905,14 +6171,9 @@ export default function App() {
     const selectionStateTimer = window.setInterval(syncSelectionState, 250)
 
     async function syncViewState() {
-      const viewStateSnapshot = {
-        ...getCowartViewState(editor),
-        updatedAt: new Date().toISOString()
-      }
-
+      const viewStateSnapshot = getCowartViewState(editor)
       const nextViewState = JSON.stringify(viewStateSnapshot)
       if (nextViewState === lastSyncedViewState) return
-      lastSyncedViewState = nextViewState
 
       if (isViewStateSaving) {
         hasPendingViewState = true
@@ -5921,7 +6182,11 @@ export default function App() {
 
       isViewStateSaving = true
       try {
-        await saveCowartViewState(viewStateSnapshot)
+        await saveCowartViewState({
+          ...viewStateSnapshot,
+          updatedAt: new Date().toISOString()
+        })
+        lastSyncedViewState = nextViewState
       } catch (error) {
         console.error(error)
       } finally {
@@ -6031,7 +6296,9 @@ export default function App() {
     }
 
     async function loadRemoteCanvasSnapshot() {
-      remoteLoadController?.abort()
+      // An MCP call can outlive the polling interval. Keep one request in flight
+      // instead of abandoning it and accumulating work in the host bridge.
+      if (isDisposed || remoteLoadController) return
       const controller = new AbortController()
       remoteLoadController = controller
 
@@ -6040,6 +6307,7 @@ export default function App() {
 
       try {
         const nextSnapshot = await refreshCowartCanvasSnapshot(controller.signal)
+        if (isDisposed || controller.signal.aborted) return
         const effectivePreserve =
           preserveLocalChanges || (preFetchStore && storeChangedSinceSnapshot(editor, preFetchStore))
         const { changedRecords } = applyRemoteCanvasSnapshot(
@@ -6158,7 +6426,9 @@ export default function App() {
     )
 
     return () => {
+      isDisposed = true
       window.clearTimeout(saveTimer)
+      window.clearTimeout(slidesLayoutTimer)
       window.clearInterval(selectionStateTimer)
       window.clearInterval(viewStateTimer)
       window.clearInterval(canvasRefreshTimer)

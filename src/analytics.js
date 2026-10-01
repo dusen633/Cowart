@@ -14,11 +14,12 @@ const GA4_CLIENT_ID_PATTERN = /^\d+\.\d+$/
 const POSTHOG_CAPTURE_PATH = '/i/v0/e/'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-const AI_TYPES = new Set(['image', 'html', 'slides'])
+const AI_TYPES = new Set(['image', 'html', 'slides', 'film'])
 const PROMPT_TYPES = new Set([
   'ai_image',
   'ai_html',
   'ai_slides',
+  'ai_film',
   'annotation_edit',
   'annotation_html',
   'slides_annotation_edit',

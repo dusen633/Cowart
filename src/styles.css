@@ -1119,3 +1119,237 @@ body {
     border-radius: 18px;
   }
 }
+
+.cowart-ai-film-generation-panel {
+  height: 320px;
+  grid-template-rows: auto auto minmax(54px, 1fr) auto;
+}
+
+.cowart-film-styles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cowart-film-styles button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 7px 10px;
+  color: #596170;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  border: 1px solid #e2e6ec;
+  border-radius: 9px;
+  background: #f7f8fa;
+  cursor: pointer;
+  transition: color 160ms ease, background-color 160ms ease, border-color 160ms ease;
+}
+
+.cowart-film-styles button:not(:disabled):hover {
+  color: #2878df;
+  border-color: #c2d4ed;
+  background: #f2f6fc;
+}
+
+.cowart-film-styles button[aria-pressed="true"] {
+  color: #2878df;
+  border-color: #aacbfa;
+  background: #eef5ff;
+}
+
+.cowart-film-styles button:focus-visible {
+  outline: 2px solid #3287ee;
+  outline-offset: 2px;
+}
+
+.cowart-film-styles button:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+.cowart-film-style-icon {
+  display: block;
+  flex: 0 0 18px;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.cowart-film-style-icon * { transform-box: view-box; }
+.cowart-film-icon-flame { transform-origin: 6px 18px; }
+.cowart-film-icon-type-main { transform-origin: 9px 19px; }
+.cowart-film-icon-type-small { transform-origin: 18px 19px; }
+.cowart-film-icon-orbits { transform-origin: 12px 12px; }
+.cowart-film-icon-clapper { transform-origin: 3px 10.5px; }
+.cowart-film-icon-flow-target { transform-origin: 19.5px 18.5px; }
+.cowart-film-icon-flow-packet { opacity: 0; }
+
+/* Only icon parts move; each finite gesture settles while the label stays put.
+   focus-visible provides the same feedback for keyboard users. */
+@media (prefers-reduced-motion: no-preference) {
+  .cowart-film-styles button:not(:disabled):focus-visible .cowart-film-icon-rocket { animation: cowart-icon-launch 540ms cubic-bezier(.22, 1, .36, 1); }
+  .cowart-film-styles button:not(:disabled):focus-visible .cowart-film-icon-flame { animation: cowart-icon-flame 540ms ease-out; }
+  .cowart-film-styles button:not(:disabled):focus-visible .cowart-film-icon-type-main { animation: cowart-icon-type 460ms cubic-bezier(.22, 1, .36, 1); }
+  .cowart-film-styles button:not(:disabled):focus-visible .cowart-film-icon-type-small { animation: cowart-icon-type-follow 460ms 70ms cubic-bezier(.22, 1, .36, 1); }
+  .cowart-film-styles button:not(:disabled):focus-visible .cowart-film-icon-orbits { animation: cowart-icon-orbit 620ms cubic-bezier(.22, 1, .36, 1); }
+  .cowart-film-styles button:not(:disabled):focus-visible .cowart-film-icon-clapper { animation: cowart-icon-clap 580ms ease-in-out; }
+  .cowart-film-styles button:not(:disabled):focus-visible .cowart-film-icon-flow-packet { animation: cowart-icon-flow 620ms linear; }
+  .cowart-film-styles button:not(:disabled):focus-visible .cowart-film-icon-flow-target { animation: cowart-icon-receive 620ms ease-out; }
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .cowart-film-styles button:not(:disabled):hover .cowart-film-icon-rocket { animation: cowart-icon-launch 540ms cubic-bezier(.22, 1, .36, 1); }
+  .cowart-film-styles button:not(:disabled):hover .cowart-film-icon-flame { animation: cowart-icon-flame 540ms ease-out; }
+  .cowart-film-styles button:not(:disabled):hover .cowart-film-icon-type-main { animation: cowart-icon-type 460ms cubic-bezier(.22, 1, .36, 1); }
+  .cowart-film-styles button:not(:disabled):hover .cowart-film-icon-type-small { animation: cowart-icon-type-follow 460ms 70ms cubic-bezier(.22, 1, .36, 1); }
+  .cowart-film-styles button:not(:disabled):hover .cowart-film-icon-orbits { animation: cowart-icon-orbit 620ms cubic-bezier(.22, 1, .36, 1); }
+  .cowart-film-styles button:not(:disabled):hover .cowart-film-icon-clapper { animation: cowart-icon-clap 580ms ease-in-out; }
+  .cowart-film-styles button:not(:disabled):hover .cowart-film-icon-flow-packet { animation: cowart-icon-flow 620ms linear; }
+  .cowart-film-styles button:not(:disabled):hover .cowart-film-icon-flow-target { animation: cowart-icon-receive 620ms ease-out; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cowart-film-styles button { transition: none; }
+}
+
+@keyframes cowart-icon-launch {
+  0%, 100% { transform: translate(0, 0); }
+  18% { transform: translate(-.6px, .6px); }
+  48% { transform: translate(1.8px, -1.8px); }
+  76% { transform: translate(-.2px, .2px); }
+}
+@keyframes cowart-icon-flame {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  28% { transform: scale(.85); opacity: .65; }
+  52% { transform: scale(1.16); opacity: 1; }
+}
+@keyframes cowart-icon-type {
+  0%, 100% { transform: translateY(0) scaleY(1); }
+  28% { transform: translateY(-1px) scaleY(1.08); }
+  62% { transform: translateY(.4px) scaleY(.98); }
+}
+@keyframes cowart-icon-type-follow {
+  0%, 100% { transform: translateY(0); }
+  30% { transform: translateY(1.8px); }
+  64% { transform: translateY(-.5px); }
+}
+@keyframes cowart-icon-orbit {
+  0%, 100% { transform: rotate(0); }
+  42% { transform: rotate(32deg); }
+  74% { transform: rotate(-5deg); }
+}
+@keyframes cowart-icon-clap {
+  0%, 100% { transform: rotate(0); }
+  30%, 42% { transform: rotate(-14deg); }
+  68% { transform: rotate(0); }
+  80% { transform: rotate(-2deg); }
+}
+@keyframes cowart-icon-flow {
+  0% { transform: translate(0, 0); opacity: 0; }
+  10% { transform: translate(0, 0); opacity: 1; }
+  28% { transform: translate(4.5px, 0); }
+  36% { transform: translate(5px, 2px); }
+  66% { transform: translate(5px, 11px); }
+  76% { transform: translate(7px, 13px); opacity: 1; }
+  92%, 100% { transform: translate(12.5px, 13px); opacity: 0; }
+}
+@keyframes cowart-icon-receive {
+  0%, 70%, 100% { transform: scale(1); }
+  86% { transform: scale(1.12); }
+}
+
+.cowart-film-options-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  color: #596170;
+  font-size: 12px;
+}
+
+.cowart-film-options-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cowart-film-options-row input[type="number"] {
+  width: 56px;
+  padding: 4px 5px;
+  font: inherit;
+  border: 1px solid #dfe3e9;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.cowart-ai-generation-footer-start {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.cowart-ai-generation-footer-start .cowart-film-options-row { flex-shrink: 0; }
+
+.cowart-film-container { overflow: visible; }
+
+.cowart-export-error {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  width: 280px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 3px 12px rgb(15 23 42 / 15%);
+  color: #bd492e;
+  font-size: 12px;
+}
+
+.cowart-film-playback {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 4px 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 3px 12px rgb(15 23 42 / 10%);
+  color: #25282d;
+  pointer-events: auto;
+}
+
+.cowart-film-playback button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.cowart-film-playback button:hover { background: #f0f3f8; }
+.cowart-film-playback button:disabled { opacity: 0.4; cursor: default; }
+.cowart-film-progress { flex: 1; min-width: 30px; width: 60px; accent-color: #2878df; cursor: pointer; }
+.cowart-film-time { font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cowart-film-playback-error { flex-basis: 100%; max-width: 280px; color: #bd492e; font-size: 11px; }
+
+@media (max-width: 600px) {
+  .cowart-film-time { display: none; }
+  .cowart-film-progress { width: 60px; }
+  .cowart-film-playback { gap: 3px; }
+}

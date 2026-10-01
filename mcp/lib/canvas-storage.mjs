@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 
@@ -640,6 +640,7 @@ export async function readCowartPageAsset(args = {}, options = {}) {
 export async function readCowartCanvasState(args = {}, { hydrateAssets = false } = {}) {
   const { projectDir, canvasDir } = resolveCowartPaths(args);
   const loaded = await loadStoredCanvasSnapshot(args);
+  const revision = createHash("sha256").update(JSON.stringify(loaded.snapshot)).digest("hex");
   const hydrated = hydrateAssets
     ? await hydrateSnapshotAssets(args, loaded.snapshot)
     : { snapshot: loaded.snapshot, hydratedAssets: [] };
@@ -649,6 +650,7 @@ export async function readCowartCanvasState(args = {}, { hydrateAssets = false }
     version: 1,
     projectDir,
     canvasDir,
+    revision,
     snapshot: hydrated.snapshot,
     path: loaded.path,
     storage: loaded.storage,

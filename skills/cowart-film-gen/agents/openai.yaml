@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cowart AI 影片"
+  short_description: "Create directed HTML motion films in a selected Cowart frame"
+  default_prompt: "Use $cowart:cowart-film-gen to create a playable motion film in the selected Cowart AI 影片 frame."

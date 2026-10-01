@@ -73,7 +73,7 @@ for (const [name, server] of Object.entries(mcpConfig.mcpServers)) {
 }
 
 const resolvedRoot = await realpath(rootDir);
-for (const skillName of ["cowart-image-edit", "cowart-image-gen", "cowart-open-canvas"]) {
+for (const skillName of ["cowart-image-edit", "cowart-image-gen", "cowart-open-canvas", "cowart-film-gen"]) {
   const skillPath = path.join(rootDir, "skills", skillName, "SKILL.md");
   assert.ok((await lstat(skillPath)).isFile(), `${skillPath} must be a regular file`);
   assert.ok((await realpath(skillPath)).startsWith(`${resolvedRoot}${path.sep}`));

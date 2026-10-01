@@ -14,6 +14,7 @@ const TOOL_DOWNLOAD_FILE = 'download_cowart_file'
 const TOOL_COPY_IMAGE_TO_CLIPBOARD = 'copy_cowart_image_to_clipboard'
 const TOOL_INSERT_HTML_DRAFT = 'insert_cowart_html_draft'
 const WIDGET_PAYLOAD_TIMEOUT_MS = 5000
+let cachedCanvasState = null
 
 globalThis.__COWART_WIDGET_FETCH_GUARD__ = true
 
@@ -42,6 +43,14 @@ function serverToolArgs(extra = {}) {
     canvasDir: payload.canvasDir,
     ...extra
   })
+}
+
+function canvasTargetKey() {
+  return JSON.stringify(serverToolArgs())
+}
+
+function cacheCanvasState(state, target) {
+  cachedCanvasState = { target, revision: state.revision, snapshot: state.snapshot }
 }
 
 function removeUndefined(value) {
@@ -102,7 +111,8 @@ async function callCowartServerTool(name, args = {}, options = {}) {
   const result = await window.cowartMcp.callServerTool({
     name,
     arguments: serverToolArgs(args)
-  })
+  }, options)
+  if (options.signal?.aborted) throw abortError()
   if (result?.isError) {
     const message = result.content?.find((item) => item.type === 'text')?.text
     throw new Error(message || `Cowart server tool failed: ${name}`)
@@ -125,6 +135,7 @@ export async function loadCowartCanvasState(signal) {
       if (signal?.aborted) throw abortError()
       await waitForWidgetPayload(signal)
       if (signal?.aborted) throw abortError()
+      const target = canvasTargetKey()
       // The opener already read the initial state. Reuse it without a second
       // tool call; later refreshes continue to read the persisted project.
       const state = currentWidgetPayload().canvasState || await callCowartServerTool(
@@ -132,6 +143,7 @@ export async function loadCowartCanvasState(signal) {
         { hydrateAssets: false },
         { signal }
       )
+      cacheCanvasState(state, target)
       reportCowartStartup('canvas_state_loaded')
       return {
         snapshot: state.snapshot,
@@ -159,11 +171,17 @@ export async function loadCowartCanvasState(signal) {
 
 export async function refreshCowartCanvasSnapshot(signal) {
   if (hasCowartWidgetBridge()) {
+    const target = canvasTargetKey()
+    const cached = cachedCanvasState?.target === target ? cachedCanvasState : null
     const state = await callCowartServerTool(
       TOOL_GET_CANVAS_STATE,
-      { hydrateAssets: false },
+      { hydrateAssets: false, ifRevision: cached?.revision },
       { signal }
     )
+    // Reuse the last snapshot for reconciliation, including changes received
+    // while local edits were pending. Retain only one response, never a history.
+    if (state.unchanged && cached && state.revision === cached.revision) return cached.snapshot
+    cacheCanvasState(state, target)
     return state.snapshot
   }
 

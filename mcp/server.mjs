@@ -62,6 +62,15 @@ const execFileAsync = promisify(execFile);
 const PAGE_ID_PREFIX = "page:";
 const COWART_WIDGET_URI = "ui://widget/cowart/canvas.html";
 const COWART_HTML_DRAFT_URL_ORIGIN = "http://cowart.local";
+const COWART_FILM_STYLES = new Set([
+  "kinetic-type",
+  "product-launch",
+  "abstract-physics",
+  "editorial-story",
+  "data-flow",
+]);
+const DEFAULT_FILM_STYLE = "product-launch";
+const DEFAULT_FILM_DURATION = 15;
 const DEFAULT_DISPLAY_MODE = "fullscreen";
 const MAX_INITIAL_CANVAS_STATE_BYTES = 32 * 1024;
 const COWART_GOOGLE_DOMAINS = [
@@ -143,7 +152,7 @@ const server = new McpServer(
   },
   {
     instructions:
-      "cowart_mcp is Cowart's core canvas MCP server. Use render_cowart_canvas_widget when the user asks to open, reopen, or explicitly refresh the native canvas. When a Cowart widget is already open, reuse it and use get_cowart_selection for persisted widget selection, save_cowart_reference_image for widget-provided reference images, read_cowart_page_asset for lazy widget asset loading, download_cowart_file to save widget-requested files into the user's Downloads folder, insert_cowart_image to place or replace bitmap assets, and insert_cowart_html_draft to save and embed HTML drafts without rendering another widget tab.",
+      "cowart_mcp is Cowart's core canvas MCP server. Use render_cowart_canvas_widget when the user asks to open, reopen, or explicitly refresh the native canvas. When a Cowart widget is already open, reuse it and use get_cowart_selection for persisted widget selection, save_cowart_reference_image for widget-provided reference images, read_cowart_page_asset for lazy widget asset loading, download_cowart_file to save widget-requested files into the user's Downloads folder, insert_cowart_image to place or replace bitmap assets, and insert_cowart_html_draft to save and embed HTML drafts or AI films without rendering another widget tab.",
   },
 );
 
@@ -379,6 +388,25 @@ function isAiImageHolderShape(shape) {
 
 function isAiDraftHolderShape(shape) {
   return shape?.typeName === "shape" && shape.meta?.cowartAiDraftHolder === true;
+}
+
+function isAiFilmHolderShape(shape) {
+  return isAiDraftHolderShape(shape) && shape.meta?.cowartAiFilmHolder === true;
+}
+
+function isCowartFilmShape(shape) {
+  return isCowartHtmlDraftShape(shape) && shape.meta?.cowartFilm === true;
+}
+
+function normalizeFilmMeta(meta = {}) {
+  return {
+    cowartFilm: true,
+    cowartFilmStyle: COWART_FILM_STYLES.has(meta.cowartFilmStyle)
+      ? meta.cowartFilmStyle
+      : DEFAULT_FILM_STYLE,
+    cowartFilmDuration: Math.max(1, Math.min(120, finiteNumber(meta.cowartFilmDuration, DEFAULT_FILM_DURATION))),
+    cowartFilmMuted: typeof meta.cowartFilmMuted === "boolean" ? meta.cowartFilmMuted : false,
+  };
 }
 
 function isAiSlidesShape(shape) {
@@ -661,7 +689,7 @@ async function insertCowartImage(args = {}) {
 }
 
 async function insertCowartHtmlDraft(args = {}) {
-  const htmlContent = nonEmptyString(args.htmlContent);
+  const htmlContent = nonEmptyString(args.htmlContent) ? args.htmlContent : null;
   const htmlPath = nonEmptyString(args.htmlPath);
   if (!htmlContent && !htmlPath) {
     throw new Error("htmlContent or htmlPath is required.");
@@ -697,6 +725,11 @@ async function insertCowartHtmlDraft(args = {}) {
   if (!pageId || !store[pageId]) throw new Error("Could not determine target pageId.");
 
   const anchorBounds = draftShape ? pageBoundsForShape(store, draftShape) : null;
+  const shapeMeta = args.shapeMeta && typeof args.shapeMeta === "object" ? { ...args.shapeMeta } : {};
+  const isFilm = isAiFilmHolderShape(draftShape) || isCowartFilmShape(draftShape) || shapeMeta.cowartFilm === true;
+  const filmMeta = isFilm
+    ? normalizeFilmMeta(isAiFilmHolderShape(draftShape) || isCowartFilmShape(draftShape) ? draftShape.meta : shapeMeta)
+    : {};
   const shouldUpdateExistingDraft = args.updateExistingDraft !== false && isCowartHtmlDraftShape(draftShape) && anchorBounds;
   const shouldTargetDraftHolder = args.matchAnchor !== false && isAiDraftHolderShape(draftShape) && anchorBounds;
   const shouldTargetAiSlides = isAiSlidesShape(draftShape);
@@ -704,10 +737,10 @@ async function insertCowartHtmlDraft(args = {}) {
   const matchAnchor = args.matchAnchor !== false && anchorBounds;
   const width = shouldUpdateExistingDraft || shouldTargetDraftHolder
     ? anchorBounds.w
-    : finiteNumber(args.displayWidth, shouldTargetAiSlides ? 1024 : matchAnchor ? anchorBounds.w : 512);
+    : finiteNumber(args.displayWidth, shouldTargetAiSlides || isFilm ? 1024 : matchAnchor ? anchorBounds.w : 512);
   const height = shouldUpdateExistingDraft || shouldTargetDraftHolder
     ? anchorBounds.h
-    : finiteNumber(args.displayHeight, shouldTargetAiSlides ? 576 : matchAnchor ? anchorBounds.h : 683);
+    : finiteNumber(args.displayHeight, shouldTargetAiSlides || isFilm ? 576 : matchAnchor ? anchorBounds.h : 683);
   const margin = Math.max(0, finiteNumber(args.margin, 40));
   const placement = ["right", "left", "below"].includes(args.placement) ? args.placement : "right";
   let parentId = draftShape?.parentId && store[draftShape.parentId] ? draftShape.parentId : pageId;
@@ -790,12 +823,15 @@ async function insertCowartHtmlDraft(args = {}) {
     ? draftShape.index
     : chooseIndex(store, parentId);
   const assetUrl = pageAssetUrl(pageId, fileName);
-  const shapeMeta = args.shapeMeta && typeof args.shapeMeta === "object" ? { ...args.shapeMeta } : {};
   if (shouldTargetDraftHolder && draftShapeId && !shapeMeta.cowartGeneratedForAiDraftHolder) {
     shapeMeta.cowartGeneratedForAiDraftHolder = draftShapeId;
   }
   if (shouldReplaceDraftHolder && draftShapeId) {
     shapeMeta.cowartReplacedAiDraftHolder = true;
+  }
+  if (isAiFilmHolderShape(draftShape) && draftShapeId) {
+    shapeMeta.cowartGeneratedForAiFilmHolder = draftShapeId;
+    if (shouldReplaceDraftHolder) shapeMeta.cowartReplacedAiFilmHolder = true;
   }
   if (shouldTargetAiSlides && draftShapeId && !shapeMeta.cowartAiSlidesParentShapeId) {
     shapeMeta.cowartAiSlidesParentShapeId = draftShapeId;
@@ -812,6 +848,7 @@ async function insertCowartHtmlDraft(args = {}) {
       cowartHtmlDraft: true,
       cowartHtmlDraftAssetUrl: assetUrl,
       ...shapeMeta,
+      ...filmMeta,
     },
     id: shapeId,
     type: "embed",
@@ -851,6 +888,8 @@ async function insertCowartHtmlDraft(args = {}) {
     updatedExistingHtmlDraft: Boolean(shouldUpdateExistingDraft),
     forkedSharedHtmlDraftAsset: shouldForkSharedAsset,
     replacedAiDraftHolder: shouldReplaceDraftHolder,
+    isFilm,
+    ...(isFilm ? { film: filmMeta } : {}),
     replacedShapeIds,
     dryRun: Boolean(args.dryRun),
   };
@@ -1249,6 +1288,7 @@ function registerCowartStateTools(mcpServer) {
       inputSchema: {
         ...projectArgsSchema,
         hydrateAssets: z.boolean().optional(),
+        ifRevision: z.string().optional().describe("Return unchanged with no snapshot when this canvas revision still matches. Only applies without asset hydration."),
       },
       annotations: {
         readOnlyHint: true,
@@ -1259,6 +1299,7 @@ function registerCowartStateTools(mcpServer) {
     },
     async (input = {}) => {
       const state = await readCowartCanvasState(input, { hydrateAssets: input.hydrateAssets === true });
+      const unchanged = input.hydrateAssets !== true && input.ifRevision === state.revision;
       return {
         content: [
           {
@@ -1266,7 +1307,7 @@ function registerCowartStateTools(mcpServer) {
             text: `Loaded Cowart canvas state from ${state.canvasDir} (${state.storage}).`,
           },
         ],
-        structuredContent: state,
+        structuredContent: unchanged ? { ...state, snapshot: null, unchanged: true } : state,
       };
     },
   );
@@ -1535,7 +1576,7 @@ function registerCowartImageTools(mcpServer) {
     {
       title: "Insert Cowart HTML Draft",
       description:
-        "Save a single-file HTML draft into the current Cowart page's assets folder, update a targeted existing HTML draft in place, replace a targeted AI HTML holder, or append a 16:9 HTML page inside an AI Slides frame.",
+        "Save a single-file HTML draft or AI film into the current Cowart page's assets folder, update a targeted existing HTML draft or film in place, replace a targeted AI HTML/AI film holder, or append a 16:9 HTML page inside an AI Slides frame. AI film holder style, duration, muted state, dimensions and placement are inherited automatically. For a standalone AI film pass shapeMeta.cowartFilm=true (default 1024x576, 15 seconds, product-launch style, unmuted). Films use the window.CowartFilm playback API and cowart-film message protocol described by the cowart-film-gen skill; this tool preserves the original HTML without injecting playback code.",
       inputSchema: {
         ...projectArgsSchema,
         htmlContent: z.string().optional(),
@@ -1549,8 +1590,8 @@ function registerCowartImageTools(mcpServer) {
         matchAnchor: z.boolean().optional(),
         replaceDraftHolder: z.boolean().optional(),
         updateExistingDraft: z.boolean().optional(),
-        displayWidth: z.number().optional(),
-        displayHeight: z.number().optional(),
+        displayWidth: z.number().positive().max(16384).optional(),
+        displayHeight: z.number().positive().max(16384).optional(),
         shapeMeta: z.record(z.string(), z.unknown()).optional(),
         dryRun: z.boolean().optional(),
       },
@@ -1580,7 +1621,7 @@ function registerCowartImageTools(mcpServer) {
     {
       title: "Get Cowart Selection",
       description:
-        "Return the currently selected Cowart/tldraw shapes and image asset metadata from a project's canvas/cowart-selection.json state file.",
+        "Return the currently selected Cowart/tldraw shapes, image asset metadata and shape meta (including AI film holder/style/duration/muted state) from a project's canvas/cowart-selection.json state file.",
       inputSchema: projectArgsSchema,
       annotations: {
         readOnlyHint: true,
@@ -1598,7 +1639,11 @@ function registerCowartImageTools(mcpServer) {
           : selectedShapes
               .map((shape) => {
                 const assetName = shape.asset?.name ? ` (${shape.asset.name})` : "";
-                return `${shape.id} [${shape.type ?? "unknown"}]${assetName}`;
+                const film = shape.meta?.cowartAiFilmHolder === true || shape.meta?.cowartFilm === true;
+                const filmSummary = film
+                  ? ` [AI film${shape.meta?.cowartAiFilmHolder === true ? " holder" : ""}; style=${shape.meta.cowartFilmStyle ?? DEFAULT_FILM_STYLE}; duration=${shape.meta.cowartFilmDuration ?? DEFAULT_FILM_DURATION}s; muted=${shape.meta.cowartFilmMuted ?? false}]`
+                  : "";
+                return `${shape.id} [${shape.type ?? "unknown"}]${assetName}${filmSummary}`;
               })
               .join("\n");
 

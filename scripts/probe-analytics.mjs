@@ -82,6 +82,13 @@ assert.equal(events[3].parameters.prompt_type, 'ai_slides')
 assert.ok(events.every(({ parameters }) => parameters.debug_mode === true))
 assert.ok(events.every(({ parameters }) => parameters.send_to === 'G-COWARTTEST'))
 
+analytics.trackAiGenerationRequested({ aiType: 'film', hasReference: true })
+analytics.trackWidgetPromptSent({ promptType: 'ai_film', hasReference: true })
+const filmEvents = windowObject.dataLayer.map((command) => Array.from(command))
+  .filter(([command]) => command === 'event').slice(-2)
+assert.equal(filmEvents[0][2].ai_type, 'film')
+assert.equal(filmEvents[1][2].prompt_type, 'ai_film')
+
 function collectObjectKeys(value, keys = new Set()) {
   if (!value || typeof value !== 'object') return keys
   for (const [key, child] of Object.entries(value)) {

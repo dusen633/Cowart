@@ -16,7 +16,7 @@ transportEnvironment.COWART_PLUGIN_ROOT = serverRoot;
 transportEnvironment.COWART_DOCUMENTS_DIR = probeUserData;
 const transport = new StdioClientTransport({
   command: "node",
-  args: ["./scripts/start-mcp.mjs"],
+  args: [process.argv.includes("--source") ? "./mcp/server.mjs" : "./scripts/start-mcp.mjs"],
   cwd: serverRoot,
   env: transportEnvironment,
 });
@@ -31,6 +31,8 @@ const startupStartedAt = performance.now();
 await client.connect(transport);
 
 let downloadedProbePath = null;
+let downloadedFilmPath = null;
+let downloadedFilmMp4Path = null;
 let downloadedProbeDirectory = null;
 let projectDir = null;
 
@@ -87,6 +89,10 @@ try {
   if (!Object.hasOwn(analyticsTool?.inputSchema?.properties || {}, "eventId")) {
     throw new Error("Cowart analytics tool should accept a dedupe eventId shared with PostHog.");
   }
+  const htmlDraftTool = tools.tools.find((tool) => tool.name === "insert_cowart_html_draft");
+  if (!/AI film/.test(htmlDraftTool?.description || "")) {
+    throw new Error("Cowart HTML draft insertion should document AI film holder inheritance.");
+  }
   const clipboardTool = tools.tools.find((tool) => tool.name === "copy_cowart_image_to_clipboard");
   if (JSON.stringify(clipboardTool?._meta?.ui?.visibility) !== JSON.stringify(["app"])) {
     throw new Error("Cowart clipboard tool should only be visible to the widget app.");
@@ -136,6 +142,14 @@ try {
   }
   if ((stateResult.structuredContent?.hydratedAssets || []).length !== 0) {
     throw new Error("Cowart canvas state should not hydrate image assets by default.");
+  }
+  const revision = stateResult.structuredContent?.revision;
+  if (!/^[a-f0-9]{64}$/.test(revision || "")) throw new Error("Canvas state must include a content revision.");
+  const unchangedState = await client.callTool({
+    name: "get_cowart_canvas_state", arguments: { projectDir, ifRevision: revision },
+  });
+  if (unchangedState.structuredContent?.unchanged !== true || unchangedState.structuredContent?.snapshot !== null) {
+    throw new Error("Unchanged canvas polling must not transfer a full snapshot.");
   }
 
   const probePageAssetDir = path.join(projectDir, "canvas", "pages", "probe-page", "assets");
@@ -219,6 +233,8 @@ try {
     throw new Error("Cowart download tool did not create the expected Slides export folder structure.");
   }
 
+  await probeAiFilmInsertion(globalLaunch.structuredContent?.canvasState?.snapshot);
+
   const resource = await client.readResource({
     uri: "ui://widget/cowart/canvas.html",
   });
@@ -292,6 +308,12 @@ try {
   if (downloadedProbePath) {
     await unlink(downloadedProbePath).catch(() => undefined);
   }
+  if (downloadedFilmPath) {
+    await unlink(downloadedFilmPath).catch(() => undefined);
+  }
+  if (downloadedFilmMp4Path) {
+    await unlink(downloadedFilmMp4Path).catch(() => undefined);
+  }
   if (downloadedProbeDirectory) {
     await rm(downloadedProbeDirectory, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -300,6 +322,155 @@ try {
   }
   await client.close();
   await rm(probeUserData, { recursive: true, force: true });
+}
+
+async function probeAiFilmInsertion(defaultSnapshot) {
+  const snapshot = structuredClone(defaultSnapshot);
+  const page = Object.values(snapshot?.store || {}).find((record) => record.typeName === "page");
+  if (!page) throw new Error("AI film probe needs the default project page.");
+  const frameRecord = (id, parentId, x, y, w, h, meta = {}, index = "a1") => ({
+    id, typeName: "shape", type: "frame", parentId, x, y, index,
+    rotation: 0, isLocked: false, opacity: 1,
+    props: { w, h, name: id, color: "blue" }, meta,
+  });
+  const parent = frameRecord("shape:film-parent", page.id, 70, 90, 1400, 1000);
+  const holder = frameRecord("shape:film-holder", parent.id, 44, 66, 640, 360, {
+    cowartAiDraftHolder: true,
+    cowartAiFilmHolder: true,
+    cowartFilmStyle: "abstract-physics",
+    cowartFilmDuration: 24,
+    cowartFilmMuted: false,
+  });
+  holder.rotation = 0.18;
+  const child = frameRecord("shape:film-holder-child", holder.id, 1, 1, 30, 30);
+  const htmlHolder = frameRecord("shape:html-holder", page.id, 2000, 10, 512, 683, {
+    cowartAiDraftHolder: true,
+  }, "a2");
+  for (const record of [parent, holder, child, htmlHolder]) snapshot.store[record.id] = record;
+  const saved = await callProbeTool("save_cowart_canvas_state", { projectDir, snapshot });
+  if (!saved.ok || saved.skippedRecords?.length) {
+    throw new Error(`AI film probe fixture must contain valid canvas records: ${JSON.stringify(saved.skippedRecords)}`);
+  }
+  await callProbeTool("save_cowart_selection_state", {
+    projectDir,
+    selection: { selectedShapes: [{ id: holder.id, type: holder.type, meta: holder.meta }] },
+  });
+  const selection = await callProbeTool("get_cowart_selection", { projectDir });
+  const selectedHolder = selection.selection?.selectedShapes?.[0];
+  if (selectedHolder?.meta?.cowartAiFilmHolder !== true || selectedHolder.meta.cowartFilmStyle !== "abstract-physics") {
+    throw new Error("Cowart selection must expose AI film holder metadata to the model.");
+  }
+
+  const filmHtml = `\n<!doctype html><html><body><h1>Film original</h1><script>
+window.CowartFilm={duration:24,seek(seconds){this.currentTime=seconds},play(){},pause(){},setMuted(value){this.muted=value}};
+window.addEventListener('message',event=>{if(event.data.channel==='cowart-film'&&event.data.type==='command'){const action=event.data.command==='mute'?'setMuted':event.data.command;window.CowartFilm[action]?.(event.data.value)}});
+parent.postMessage({channel:'cowart-film',type:'status',duration:24,currentTime:0,playing:false,muted:false},'*');
+</script></body></html>\n`;
+  const film = await callProbeTool("insert_cowart_html_draft", {
+    projectDir, draftShapeId: holder.id, htmlContent: filmHtml, fileName: "probe-film.html",
+    // Omit shapeMeta deliberately: holder metadata must identify the generated film.
+  });
+  const assertFilmPlacement = (record) => {
+    if (record?.parentId !== parent.id || record.x !== holder.x || record.y !== holder.y ||
+        record.rotation !== holder.rotation || record.props?.w !== holder.props.w || record.props?.h !== holder.props.h ||
+        record.index !== holder.index) {
+      throw new Error("AI film insertion/update must retain holder parent, coordinates, dimensions, rotation and index.");
+    }
+    if (record.meta?.cowartFilm !== true || record.meta.cowartFilmStyle !== "abstract-physics" ||
+        record.meta.cowartFilmDuration !== 24 || record.meta.cowartFilmMuted !== false ||
+        record.meta.cowartGeneratedForAiFilmHolder !== holder.id) {
+      throw new Error("AI film insertion/update must inherit film identity, holder, style, duration and mute state.");
+    }
+  };
+  let state = await callProbeTool("get_cowart_canvas_state", { projectDir });
+  assertFilmPlacement(state.snapshot?.store?.[film.shapeId]);
+  if (!film.replacedAiDraftHolder || !film.isFilm || state.snapshot.store[holder.id] || state.snapshot.store[child.id]) {
+    throw new Error("AI film insertion must replace its holder and descendants using the existing HTML holder workflow.");
+  }
+  if (await readFile(film.assetFile, "utf8") !== filmHtml) {
+    throw new Error("AI film insertion must preserve the authored HTML source exactly.");
+  }
+
+  const editedHtml = filmHtml.replace("Film original", "Film edited");
+  const beforeEditRevision = state.revision;
+  const edited = await callProbeTool("insert_cowart_html_draft", {
+    projectDir, draftShapeId: film.shapeId, htmlContent: editedHtml,
+    shapeMeta: { cowartFilm: false, cowartFilmStyle: "unknown", cowartFilmDuration: 0, cowartFilmMuted: true },
+  });
+  state = await callProbeTool("get_cowart_canvas_state", { projectDir, ifRevision: beforeEditRevision });
+  if (state.unchanged || state.revision === beforeEditRevision) {
+    throw new Error("Editing canvas content must invalidate the previous polling revision.");
+  }
+  const reloadedFilm = state.snapshot?.store?.[film.shapeId];
+  assertFilmPlacement(reloadedFilm);
+  if (!edited.updatedExistingHtmlDraft || edited.shapeId !== film.shapeId || edited.assetFile !== film.assetFile ||
+      Buffer.from(reloadedFilm.props.url.split(",")[1], "base64").toString("utf8") !== editedHtml) {
+    throw new Error("Editing an AI film must retain its existing shape/file and reload the complete playback HTML.");
+  }
+  const filmAsset = await callProbeTool("read_cowart_page_asset", { projectDir, assetUrl: film.assetUrl });
+  if (filmAsset.mimeType !== "text/html" || Buffer.from(filmAsset.dataBase64, "base64").toString("utf8") !== editedHtml) {
+    throw new Error("AI film asset reload must return the original playback protocol and edited text.");
+  }
+  const exported = await callProbeTool("download_cowart_file", {
+    projectDir, assetUrl: film.assetUrl, fileName: `cowart-film-probe-${process.pid}.html`,
+  });
+  downloadedFilmPath = exported.filePath;
+  if (await readFile(downloadedFilmPath, "utf8") !== editedHtml) {
+    throw new Error("AI film HTML export must preserve the complete edited playback source.");
+  }
+  const mp4Fixture = optionValue("--mp4-fixture");
+  if (mp4Fixture) {
+    const mp4 = await readFile(mp4Fixture);
+    if (mp4.toString("ascii", 4, 8) !== "ftyp") throw new Error("MP4 probe fixture must be an actual MP4 file.");
+    const downloaded = await callProbeTool("download_cowart_file", {
+      projectDir, dataUrl: `data:video/mp4;base64,${mp4.toString("base64")}`,
+      fileName: `cowart-film-probe-${process.pid}.mp4`, mimeType: "video/mp4",
+    });
+    downloadedFilmMp4Path = downloaded.filePath;
+    if (downloaded.mimeType !== "video/mp4" || !(await readFile(downloadedFilmMp4Path)).equals(mp4)) {
+      throw new Error("AI film MP4 download must preserve the complete rendered video and soundtrack.");
+    }
+    console.log("OK: Rendered MP4 downloads to Downloads with exact video/audio bytes and MIME type.");
+  }
+
+  const ordinaryHtml = "<!doctype html><title>Ordinary HTML</title>";
+  const ordinary = await callProbeTool("insert_cowart_html_draft", {
+    projectDir, draftShapeId: htmlHolder.id, htmlContent: ordinaryHtml, fileName: "probe-ordinary.html",
+  });
+  state = await callProbeTool("get_cowart_canvas_state", { projectDir });
+  const ordinaryRecord = state.snapshot?.store?.[ordinary.shapeId];
+  if (ordinary.isFilm || ordinaryRecord?.meta?.cowartFilm || ordinaryRecord?.props?.w !== 512 ||
+      ordinaryRecord.props.h !== 683 || await readFile(ordinary.assetFile, "utf8") !== ordinaryHtml) {
+    throw new Error("AI film support must preserve ordinary AI HTML holder behavior.");
+  }
+  await callProbeTool("save_cowart_selection_state", { projectDir, selection: { selectedShapes: [] } });
+  const standalone = await callProbeTool("insert_cowart_html_draft", {
+    projectDir, pageId: page.id, htmlContent: filmHtml, shapeMeta: { cowartFilm: true }, dryRun: true,
+  });
+  if (standalone.bounds?.w !== 1024 || standalone.bounds?.h !== 576 || standalone.film?.cowartFilmDuration !== 15 ||
+      standalone.film.cowartFilmStyle !== "product-launch" || standalone.film.cowartFilmMuted !== false) {
+    throw new Error("A standalone AI film must default to 16:9, 15 seconds, product-launch and unmuted playback.");
+  }
+  const invalidMeta = await callProbeTool("insert_cowart_html_draft", {
+    projectDir, pageId: page.id, htmlContent: filmHtml,
+    shapeMeta: { cowartFilm: true, cowartFilmStyle: "unknown", cowartFilmDuration: 500, cowartFilmMuted: "false" }, dryRun: true,
+  });
+  if (invalidMeta.film?.cowartFilmDuration !== 120 || invalidMeta.film?.cowartFilmStyle !== "product-launch" ||
+      invalidMeta.film?.cowartFilmMuted !== false) {
+    throw new Error("AI film metadata must normalize invalid styles, durations and mute flags.");
+  }
+  const invalidDimensions = await client.callTool({
+    name: "insert_cowart_html_draft",
+    arguments: { projectDir, pageId: page.id, htmlContent: filmHtml, displayWidth: -1, dryRun: true },
+  });
+  if (!invalidDimensions.isError) throw new Error("HTML/film display dimensions must reject negative sizes.");
+  console.log("OK: AI film holder insertion, metadata, placement, text update, HTML reload/export and ordinary HTML regression.");
+}
+
+async function callProbeTool(name, args) {
+  const result = await client.callTool({ name, arguments: args });
+  if (result.isError) throw new Error(`${name}: ${result.content?.find((item) => item.type === "text")?.text || "tool failed"}`);
+  return result.structuredContent;
 }
 
 function optionValue(name) {

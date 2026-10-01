@@ -338,6 +338,63 @@ test('first canvas load reuses the opener state without another server call', as
   h.assertClean()
 })
 
+test('canvas refresh forwards cancellation through the release bridge', async () => {
+  const h = harness()
+  await h.ready()
+  h.result({ projectDir: '/startup-probe/project' })
+  const controller = new AbortController()
+  let signal
+  h.context.__COWART_MCP_APP__.callServerTool = async (_request, options) => {
+    signal = options.signal
+    return { structuredContent: { snapshot: null } }
+  }
+  await h.context.cowartClient.refreshCowartCanvasSnapshot(controller.signal)
+  assert.equal(signal, controller.signal)
+  h.assertClean()
+})
+
+test('conditional refresh reuses one snapshot and advances its revision after a remote edit', async () => {
+  const h = harness()
+  await h.ready()
+  const original = { store: { 'shape:one': { text: 'original' } } }
+  const edited = { store: { 'shape:one': { text: 'edited' } } }
+  h.result({ projectDir: '/startup-probe/project', canvasState: { snapshot: original, revision: 'one' } })
+  await h.load()
+  const requests = []
+  let next = { snapshot: null, unchanged: true, revision: 'one' }
+  h.context.__COWART_MCP_APP__.callServerTool = async (request) => {
+    requests.push(request)
+    return { structuredContent: next }
+  }
+  assert.equal(await h.context.cowartClient.refreshCowartCanvasSnapshot(), original)
+  assert.equal(requests.at(-1).arguments.ifRevision, 'one')
+  next = { snapshot: edited, revision: 'two' }
+  assert.equal(await h.context.cowartClient.refreshCowartCanvasSnapshot(), edited)
+  next = { snapshot: null, unchanged: true, revision: 'two' }
+  assert.equal(await h.context.cowartClient.refreshCowartCanvasSnapshot(), edited)
+  assert.equal(requests.at(-1).arguments.ifRevision, 'two')
+  h.result({ projectDir: '/startup-probe/other-project' })
+  next = { snapshot: null, revision: 'other' }
+  await h.context.cowartClient.refreshCowartCanvasSnapshot()
+  assert.equal(requests.at(-1).arguments.ifRevision, undefined, 'A different project cannot reuse the old canvas revision')
+  h.assertClean()
+})
+
+test('a canceled canvas refresh rejects even if the host delivers a late result', async () => {
+  const h = harness()
+  await h.ready()
+  h.result({ projectDir: '/startup-probe/project' })
+  const controller = new AbortController()
+  let complete
+  h.context.__COWART_MCP_APP__.callServerTool = () => new Promise((resolve) => { complete = resolve })
+  const refresh = h.context.cowartClient.refreshCowartCanvasSnapshot(controller.signal)
+  await flush()
+  controller.abort()
+  complete({ structuredContent: { snapshot: null } })
+  await assert.rejects(refresh, { name: 'AbortError' })
+  h.assertClean()
+})
+
 test('project conversation JSON content wrappers preserve the target and initial state', async () => {
   for (const layers of [1, 2]) {
     const h = harness()
