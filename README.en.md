@@ -119,17 +119,6 @@ Bring product launches, kinetic typography, abstract physics, editorial stories,
 
 ![Cowart AI Films: from a prompt to a playable film on the canvas](assets/ai-film.png)
 
-*AI-generated illustration based on the current Cowart interface and actual workflow.*
-
-1. Create an `AI 影片` slot. Its default is `1024 × 576` (16:9); reuse the right-side AI slot controls for size, ratio and aspect locking.
-2. Choose product launch, kinetic type, abstract physics, editorial story or data flow above the prompt. Set duration at the bottom left (15 seconds by default, 1–120 seconds). Films start unmuted, and optionally upload or paste reference images.
-3. Sending asks Codex to read `cowart-film-gen` and the selected style reference, then generate a standalone HTML/JS motion film with a storyboard, motion, background sound and event audio into the slot.
-4. Select the film to play/pause, seek, mute, edit DOM text and export HTML. Text editing pauses playback. “导出为影片” renders a 30 FPS MP4 with music and sound effects (maximum long edge 1920 px), displays progress, and saves to Downloads. Preview mute does not affect the exported soundtrack. Export requires host support for H.264/AAC WebCodecs encoding and reports unsupported codecs. Annotation editing and annotation image generation are not included.
-
-See the [film skill](skills/cowart-film-gen/SKILL.md) and [runtime contract](skills/cowart-film-gen/references/runtime-contract.md). Generated and exported self-contained HTML contains only film content and its playback API. The AI film container on the infinite canvas provides play/pause, progress, and mute controls. Export and preview scrubbing share a 30 FPS time grid. Export awaits asynchronous initialization, seek completion and font/image readiness, including CSS backgrounds. Embedded video is decoded at the requested timestamp via WebCodecs and fitted into its original geometry. Pending work supports cancellation and deadlines; failed assets and duration mismatches are reported.
-
-Production now starts with a compact visual system and timed shots specifying actions, consequences, and handoffs, followed by a reusable subject/rig and the hardest transition. Actual keyframes, event-adjacent frames, and contact sheets where available guide visual repairs. The workflow is written for Codex/GPT and scales to the requested duration and speed. See [directing](skills/cowart-film-gen/references/directing.md), [visual review](skills/cowart-film-gen/references/visual-review.md), and [source inspection/adaptation](skills/cowart-film-gen/references/sources.md).
-
 ### Create And Present AI Slides
 
 1. Create `AI Slides` from the toolbar. The default frame is `1048 × 600`, providing room for one `1024 × 576` (16:9) page with `12px` padding on every side.
