@@ -181,28 +181,6 @@ HTML 图片导出、标注截图和幻灯片导出共用 `src/htmlDraftCapture.j
 - `COWART_PROJECT_DIR`：画布数据所属的用户项目目录。
 - `COWART_CANVAS_DIR`：画布数据目录，默认是 `$COWART_PROJECT_DIR/canvas`。
 
-## 匿名使用统计
-
-Widget 会记录匿名产品事件（`canvas_opened`、`annotation_created`、`ai_generation_requested`、`widget_prompt_sent`），不包含 prompt、文件名或画布内容。
-
-影片使用以下事件，与 Cowart-web 保持同名：
-
-| 事件 | 触发条件 |
-| --- | --- |
-| `ai_film_frame_created` | 创建影片占位框 |
-| `ai_generation_requested`（`ai_type=film`） | 发送影片生成请求 |
-| `ai_film_inserted` | MCP 完成影片插入或更新并保存；预检不计数 |
-| `ai_film_playback_action` | 用户播放、暂停、调整进度、切换静音；自动暂停不计数 |
-| `ai_film_export_started/succeeded/failed/cancelled` | HTML/MP4 导出开始及最终结果；成功在下载流程完成后记录 |
-
-影片事件只携带 `film_style`、`film_duration`（秒）、`film_width`、`film_height`、`film_muted=yes/no` 等有限产品参数；播放和导出分别增加 `playback_action`、`export_format`。生成请求中的影片参数也支持按风格和时长分析。插入事件使用当前 MCP 进程中同一画布 Widget 的匿名客户端 id（`completion_status=local_saved`）；没有已注册的 Widget 客户端时跳过，避免虚构用户。项目路径仅用于 MCP 本地关联，不会发送给统计服务。
-
-
-- 主通道：`track_cowart_analytics_event` MCP 工具，服务端同时投递 GA4 Measurement Protocol 与 PostHog。
-- 兜底通道：仅在 MCP 通道不可用时，Widget 直接调用 GA4 gtag 与 PostHog capture；两边共用同一个事件 uuid，重试不会重复计数。
-- PostHog 项目 token（公开、只写）放在 `.codex-plugin/posthog.json`；本地覆盖用 `.codex-plugin/posthog.local.json` 或 `COWART_POSTHOG_PROJECT_TOKEN`。
-- PostHog 未配置 token 时投递自动跳过，不影响 Widget 运行。
-
 ## 开发者
 
 ZHONG XIN  
