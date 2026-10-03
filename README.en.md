@@ -19,6 +19,7 @@ Open [**cowart.jiqiren.ai**](https://cowart.jiqiren.ai/) in the Codex built-in b
 - Persist canvas pages and image assets in the active project directory.
 - Create AI image slots on the canvas, enter a prompt directly, choose reference images, and let Codex generate an image that replaces the selected slot at the same position and aspect ratio.
 - Create a 16:9 `AI HTML` slot, generate a runnable single-file HTML page from a prompt and reference images, and embed it directly on the canvas for further editing and iteration.
+- Create `AI 影片` to turn a prompt and reference images into an HTML/JS motion film with timed shots, music, and sound effects; preview it on the canvas, edit its text, and export MP4.
 - Create `AI Slides` to organize images and HTML into a deck, or ask Codex to generate a specified number of coordinated 16:9 HTML pages; preview the deck with thumbnails or play it fullscreen.
 - After annotating an image, submit the annotation screenshot directly from the canvas so Codex can generate a clean revised image beside the original.
 - Use Cowart MCP tools to read selection state, save the canvas, insert images or HTML, and save page-local assets.
@@ -113,6 +114,12 @@ The generated HTML is stored as an embedded canvas page in the current page's `a
 ![Edit Cowart AI HTML](assets/edit-html.png)
 
 ### Generate AI Films
+
+Bring product launches, kinetic typography, abstract physics, editorial stories, or data flows onto the canvas. Choose a style and duration, enter a prompt and optionally add reference images, and Codex creates a playable motion film. Preview it in place, edit its text, and export an MP4 with music and sound effects.
+
+![Cowart AI Films: from a prompt to a playable film on the canvas](assets/ai-film.png)
+
+*AI-generated illustration based on the current Cowart interface and actual workflow.*
 
 1. Create an `AI 影片` slot. Its default is `1024 × 576` (16:9); reuse the right-side AI slot controls for size, ratio and aspect locking.
 2. Choose product launch, kinetic type, abstract physics, editorial story or data flow above the prompt. Set duration at the bottom left (15 seconds by default, 1–120 seconds). Films start unmuted, and optionally upload or paste reference images.
