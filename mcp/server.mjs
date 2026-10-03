@@ -2,6 +2,7 @@ import { FILM_STYLES } from "../src/filmConfig.js";
 import { createFilmInsertionAnalytics } from "./lib/film-analytics.mjs";
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, platform, tmpdir } from "node:os";
@@ -30,6 +31,7 @@ import {
   resolveCanvasDir,
   resolveCowartPaths,
   saveCowartCanvasSnapshot,
+  withCowartCanvasTransaction,
   writeCowartPageAsset,
   writeCowartSelectionState,
   writeCowartViewState,
@@ -427,10 +429,6 @@ function cowartHtmlDraftVirtualUrl(assetUrl) {
   return `${COWART_HTML_DRAFT_URL_ORIGIN}${assetUrl}`;
 }
 
-function cowartHtmlDraftDataUrl(htmlContent) {
-  return `data:text/html;base64,${Buffer.from(String(htmlContent || ""), "utf8").toString("base64")}`;
-}
-
 function collectDescendantShapeIds(store, shapeId) {
   if (!shapeId) return [];
   const byParent = new Map();
@@ -514,6 +512,10 @@ async function getImageDimensions(filePath) {
 }
 
 async function insertCowartImage(args = {}) {
+  return withCowartCanvasTransaction(args, () => insertCowartImageInTransaction(args));
+}
+
+async function insertCowartImageInTransaction(args = {}) {
   const imagePath = nonEmptyString(args.imagePath);
   if (!imagePath) throw new Error("imagePath is required.");
 
@@ -668,7 +670,8 @@ async function insertCowartImage(args = {}) {
           ])),
         }
       : args;
-    await saveCowartCanvasSnapshot(saveArgs, snapshot);
+    const saved = await saveCowartCanvasSnapshot(saveArgs, snapshot);
+    if (!saved.ok) throw new Error(saved.message || "Cowart could not save the inserted image.");
   }
 
   return {
@@ -692,6 +695,10 @@ async function insertCowartImage(args = {}) {
 }
 
 async function insertCowartHtmlDraft(args = {}) {
+  return withCowartCanvasTransaction(args, () => insertCowartHtmlDraftInTransaction(args));
+}
+
+async function insertCowartHtmlDraftInTransaction(args = {}) {
   const htmlContent = nonEmptyString(args.htmlContent) ? args.htmlContent : null;
   const htmlPath = nonEmptyString(args.htmlPath);
   if (!htmlContent && !htmlPath) {
@@ -710,6 +717,14 @@ async function insertCowartHtmlDraft(args = {}) {
 
   const canvasState = await readCowartCanvasState(args, { hydrateAssets: false });
   const snapshot = canvasState.snapshot;
+  if (args.expectedRevision !== undefined && args.expectedRevision !== canvasState.revision) {
+    return {
+      ok: false,
+      storage: "revision-conflict",
+      revision: canvasState.revision,
+      message: "Cowart canvas changed before this HTML edit could be saved. The current draft file and canvas were preserved; reload before saving.",
+    };
+  }
   if (!snapshot || typeof snapshot !== "object" || !snapshot.schema || !snapshot.store) {
     throw new Error("No Cowart canvas snapshot exists yet. Open the Cowart widget for the target project and create or save the canvas before inserting HTML drafts.");
   }
@@ -826,6 +841,7 @@ async function insertCowartHtmlDraft(args = {}) {
     ? draftShape.index
     : chooseIndex(store, parentId);
   const assetUrl = pageAssetUrl(pageId, fileName);
+  const contentHash = createHash("sha256").update(finalHtml).digest("hex");
   if (shouldTargetDraftHolder && draftShapeId && !shapeMeta.cowartGeneratedForAiDraftHolder) {
     shapeMeta.cowartGeneratedForAiDraftHolder = draftShapeId;
   }
@@ -852,6 +868,7 @@ async function insertCowartHtmlDraft(args = {}) {
       cowartHtmlDraftAssetUrl: assetUrl,
       ...shapeMeta,
       ...filmMeta,
+      cowartHtmlDraftContentHash: contentHash,
     },
     id: shapeId,
     type: "embed",
@@ -859,13 +876,14 @@ async function insertCowartHtmlDraft(args = {}) {
       ...(shouldUpdateExistingDraft && draftShape.props && typeof draftShape.props === "object" ? draftShape.props : {}),
       w: width,
       h: height,
-      url: cowartHtmlDraftDataUrl(finalHtml),
+      url: cowartHtmlDraftVirtualUrl(assetUrl),
     },
     parentId,
     index,
     typeName: "shape",
   };
 
+  let revision;
   if (!args.dryRun) {
     await mkdir(assetsDir, { recursive: true });
     await writeFile(filePath, finalHtml);
@@ -873,7 +891,12 @@ async function insertCowartHtmlDraft(args = {}) {
       delete store[replacedShapeId];
     }
     store[shapeId] = shapeRecord;
-    await saveCowartCanvasSnapshot(args, snapshot);
+    // This transaction already checked the baseline before modifying the HTML
+    // file. A legacy inline record's canonical revision can change with that
+    // file, so do not check the same baseline again after the authorized write.
+    const saved = await saveCowartCanvasSnapshot({ ...args, expectedRevision: undefined }, snapshot);
+    if (!saved.ok) throw new Error(saved.message || "Cowart could not save the inserted HTML draft.");
+    revision = saved.revision;
   }
 
   return {
@@ -885,8 +908,12 @@ async function insertCowartHtmlDraft(args = {}) {
     index,
     assetFile: filePath,
     assetUrl,
+    contentHash,
+    previousRevision: canvasState.revision,
+    revision,
+    shapeRecord,
     virtualUrl: cowartHtmlDraftVirtualUrl(assetUrl),
-    displayUrlKind: "data:text/html;base64",
+    displayUrlKind: "file-backed-html",
     bounds,
     updatedExistingHtmlDraft: Boolean(shouldUpdateExistingDraft),
     forkedSharedHtmlDraftAsset: shouldForkSharedAsset,
@@ -1179,7 +1206,12 @@ function registerCowartWidget(mcpServer) {
   );
 }
 
-async function launcherCanvasState(target, { ensurePage = false } = {}) {
+async function launcherCanvasState(target, options = {}) {
+  if (!options.ensurePage) return launcherCanvasStateInTransaction(target, options);
+  return withCowartCanvasTransaction(target, () => launcherCanvasStateInTransaction(target, options));
+}
+
+async function launcherCanvasStateInTransaction(target, { ensurePage = false } = {}) {
   let state = await readCowartCanvasState(target, { hydrateAssets: false });
   if (ensurePage && !Object.values(state.snapshot?.store || {}).some((record) => record?.typeName === "page")) {
     const { createCowartSnapshotWithDefaultPage } = await import("../src/canvasSnapshot.js");
@@ -1187,7 +1219,7 @@ async function launcherCanvasState(target, { ensurePage = false } = {}) {
     if (!saved.ok) throw new Error("无法创建 Cowart 默认页面。");
     state = await readCowartCanvasState(target, { hydrateAssets: false });
   }
-  return { snapshot: state.snapshot, storage: state.storage, viewState: state.viewState };
+  return { snapshot: state.snapshot, storage: state.storage, viewState: state.viewState, revision: state.revision };
 }
 
 const filmInsertionAnalytics = createFilmInsertionAnalytics({
@@ -1372,6 +1404,7 @@ function registerCowartStateTools(mcpServer) {
       inputSchema: {
         ...projectArgsSchema,
         snapshot: z.any(),
+        expectedRevision: z.string().optional().describe("Only save when the last applied canvas revision still matches; stale full snapshots are refused."),
         protectImageRecords: z.boolean().optional(),
         acknowledgedImageShapeDeletes: z.array(z.string()).optional(),
       },
@@ -1610,6 +1643,7 @@ function registerCowartImageTools(mcpServer) {
         matchAnchor: z.boolean().optional(),
         replaceDraftHolder: z.boolean().optional(),
         updateExistingDraft: z.boolean().optional(),
+        expectedRevision: z.string().optional().describe("Only update when this applied widget revision still matches; stale HTML edits are refused before changing the draft file."),
         displayWidth: z.number().positive().max(16384).optional(),
         displayHeight: z.number().positive().max(16384).optional(),
         shapeMeta: z.record(z.string(), z.unknown()).optional(),
@@ -1624,6 +1658,9 @@ function registerCowartImageTools(mcpServer) {
     },
     async (input = {}) => {
       const result = await insertCowartHtmlDraft(input);
+      if (result.ok === false) {
+        return { isError: true, content: [{ type: "text", text: result.message }], structuredContent: result };
+      }
       // Save succeeded; telemetry runs in the background, including updates.
       void filmInsertionAnalytics.track(result.canvasDir, result);
       return {

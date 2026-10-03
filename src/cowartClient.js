@@ -15,6 +15,22 @@ const TOOL_COPY_IMAGE_TO_CLIPBOARD = 'copy_cowart_image_to_clipboard'
 const TOOL_INSERT_HTML_DRAFT = 'insert_cowart_html_draft'
 const WIDGET_PAYLOAD_TIMEOUT_MS = 5000
 let cachedCanvasState = null
+let appliedCanvasState = null
+let canvasWriteQueue = Promise.resolve()
+
+function queueCanvasWrite(operation) {
+  const writing = canvasWriteQueue.then(operation)
+  canvasWriteQueue = writing.catch(() => {})
+  return writing
+}
+
+function appliedCanvasBaseline(target) {
+  const baseline = appliedCanvasState?.target === target ? appliedCanvasState : null
+  if (!baseline?.revision) {
+    throw new Error('Cowart has no applied canvas revision. Load the canvas before saving.')
+  }
+  return baseline
+}
 
 globalThis.__COWART_WIDGET_FETCH_GUARD__ = true
 
@@ -115,7 +131,9 @@ async function callCowartServerTool(name, args = {}, options = {}) {
   if (options.signal?.aborted) throw abortError()
   if (result?.isError) {
     const message = result.content?.find((item) => item.type === 'text')?.text
-    throw new Error(message || `Cowart server tool failed: ${name}`)
+    const error = new Error(message || `Cowart server tool failed: ${name}`)
+    error.storage = result.structuredContent?.storage
+    throw error
   }
   return result.structuredContent ?? result
 }
@@ -144,6 +162,7 @@ export async function loadCowartCanvasState(signal) {
         { signal }
       )
       cacheCanvasState(state, target)
+      appliedCanvasState = cachedCanvasState
       reportCowartStartup('canvas_state_loaded')
       return {
         snapshot: state.snapshot,
@@ -189,19 +208,44 @@ export async function refreshCowartCanvasSnapshot(signal) {
   return canvasData.snapshot
 }
 
+// Polling may observe a new revision while the editor has unsaved changes.
+// Only advance the save baseline once that state has actually been applied.
+export function acceptCowartCanvasSnapshot(snapshot) {
+  const target = canvasTargetKey()
+  if (cachedCanvasState?.target === target && cachedCanvasState.snapshot === snapshot) {
+    appliedCanvasState = cachedCanvasState
+  }
+}
+
 export async function saveCowartCanvasSnapshot(snapshot, options = {}) {
   if (hasCowartWidgetBridge()) {
-    return callCowartServerTool(TOOL_SAVE_CANVAS_STATE, {
-      snapshot,
-      protectImageRecords: options.protectImageRecords,
-      acknowledgedImageShapeDeletes: options.acknowledgedImageShapeDeletes
+    const target = canvasTargetKey()
+    return queueCanvasWrite(async () => {
+      if (canvasTargetKey() !== target) throw new Error('Cowart canvas target changed before saving.')
+      const baseline = appliedCanvasBaseline(target)
+      // A DOM edit may be ahead of this save in the queue. Read the editor only
+      // after that write and its local delta finish, never capture an old draft.
+      const savingSnapshot = typeof snapshot === 'function' ? snapshot() : snapshot
+      const result = await callCowartServerTool(TOOL_SAVE_CANVAS_STATE, {
+        snapshot: savingSnapshot,
+        expectedRevision: baseline.revision,
+        protectImageRecords: options.protectImageRecords,
+        acknowledgedImageShapeDeletes: options.acknowledgedImageShapeDeletes
+      })
+      if (result?.ok !== false && result?.revision) {
+        appliedCanvasState = { target, revision: result.revision, snapshot: savingSnapshot }
+        // A write can race a poll. Do not reuse a pre-write poll as unchanged.
+        cachedCanvasState = null
+      }
+      return result
     })
   }
 
+  const savingSnapshot = typeof snapshot === 'function' ? snapshot() : snapshot
   return fetchJson(CANVAS_ENDPOINT, {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(snapshot)
+    body: JSON.stringify(savingSnapshot)
   })
 }
 
@@ -253,19 +297,52 @@ export async function copyCowartImageToClipboard(image) {
   return callCowartServerTool(TOOL_COPY_IMAGE_TO_CLIPBOARD, image)
 }
 
-export async function updateCowartHtmlDraft({ draftShapeId, htmlContent }) {
+export async function updateCowartHtmlDraft({ draftShapeId, htmlContent }, { applyResult } = {}) {
   if (!hasCowartWidgetBridge()) {
-    return fetchJson('/api/html-draft', {
+    const result = await fetchJson('/api/html-draft', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ draftShapeId, htmlContent })
     })
+    if (applyResult) await applyResult(result)
+    return result
   }
 
-  return callCowartServerTool(TOOL_INSERT_HTML_DRAFT, {
-    draftShapeId,
-    htmlContent,
-    updateExistingDraft: true
+  const target = canvasTargetKey()
+  return queueCanvasWrite(async () => {
+    if (canvasTargetKey() !== target) throw new Error('Cowart canvas target changed before saving the HTML draft.')
+    const baseline = appliedCanvasBaseline(target)
+    const result = await callCowartServerTool(TOOL_INSERT_HTML_DRAFT, {
+      draftShapeId,
+      htmlContent,
+      updateExistingDraft: true,
+      expectedRevision: baseline.revision
+    })
+    if (
+      canvasTargetKey() !== target || appliedCanvasState?.target !== target ||
+      appliedCanvasState.revision !== baseline.revision
+    ) {
+      // Polling can apply this edit, or an even newer remote edit, before its
+      // delayed response arrives. Never replay the older metadata over it.
+      cachedCanvasState = null
+      return result
+    }
+    // The server checked the prior revision before writing the file. Apply the
+    // exact persisted delta before releasing the queue to the next autosave.
+    const applied = applyResult ? await applyResult(result) : false
+    if (
+      applied !== false && result?.revision && result?.shapeRecord &&
+      result.previousRevision === baseline.revision &&
+      appliedCanvasState?.target === target && appliedCanvasState.revision === baseline.revision
+    ) {
+      appliedCanvasState = {
+        target,
+        revision: result.revision,
+        snapshot: { ...baseline.snapshot, store: { ...baseline.snapshot?.store, [result.shapeId]: result.shapeRecord } }
+      }
+      cachedCanvasState = null
+    }
+    return result
   })
 }
 

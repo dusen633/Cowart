@@ -412,8 +412,8 @@ parent.postMessage({channel:'cowart-film',type:'status',duration:24,currentTime:
   const reloadedFilm = state.snapshot?.store?.[film.shapeId];
   assertFilmPlacement(reloadedFilm);
   if (!edited.updatedExistingHtmlDraft || edited.shapeId !== film.shapeId || edited.assetFile !== film.assetFile ||
-      Buffer.from(reloadedFilm.props.url.split(",")[1], "base64").toString("utf8") !== editedHtml) {
-    throw new Error("Editing an AI film must retain its existing shape/file and reload the complete playback HTML.");
+      reloadedFilm.props.url !== edited.virtualUrl) {
+    throw new Error("Editing an AI film must retain its existing shape/file and reference its lazy playback HTML.");
   }
   const filmAsset = await callProbeTool("read_cowart_page_asset", { projectDir, assetUrl: film.assetUrl });
   if (filmAsset.mimeType !== "text/html" || Buffer.from(filmAsset.dataBase64, "base64").toString("utf8") !== editedHtml) {

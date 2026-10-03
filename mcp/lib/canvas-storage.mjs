@@ -1,11 +1,101 @@
 import { createHash, randomUUID } from "node:crypto";
-import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { copyFile, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, join, isAbsolute, relative, resolve, sep } from "node:path";
 
 const PAGE_ID_PREFIX = "page:";
 const GLOBAL_ASSETS_ROUTE = "/assets/";
 const PAGE_ASSETS_ROUTE = "/page-assets/";
 const CANVAS_FILE_NAME = "cowart-canvas.json";
+const HTML_DRAFT_URL_ORIGIN = "http://cowart.local";
+const canvasTransactions = new AsyncLocalStorage();
+const canvasQueues = new Map();
+const LOCK_WAIT_MS = 30_000;
+
+function processIsAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return true;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error?.code !== "ESRCH"; }
+}
+
+async function liveCanvasLockParticipants(lockDir) {
+  const participants = [];
+  for (const name of await readdir(lockDir)) {
+    if (!/^\d+-[a-f0-9-]+\.json$/.test(name)) continue;
+    const filePath = join(lockDir, name);
+    let owner;
+    try { owner = JSON.parse(await readFile(filePath, "utf8")); }
+    catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    if (!processIsAlive(owner.pid)) {
+      // Participant names are unique and never reused. Removing an exited
+      // participant cannot unlink a newly acquired lock from another process.
+      await rm(filePath, { force: true });
+      continue;
+    }
+    participants.push({ ...owner, name });
+  }
+  return participants;
+}
+
+async function acquireCanvasFileLock(canvasDir) {
+  const lockDir = join(canvasDir, ".cowart-canvas-lock");
+  await mkdir(lockDir, { recursive: true });
+  if (!isSafeChildPath(canvasDir, await realpath(lockDir))) {
+    throw new Error("Unsafe Cowart canvas lock directory.");
+  }
+  const name = `${process.pid}-${randomUUID()}.json`;
+  const participantPath = join(lockDir, name);
+  const started = Date.now();
+  try {
+    // Lamport's bakery ordering: atomically announce choosing before reading
+    // ticket numbers. A joining process then either waits for this choice or
+    // observes the published number and takes a later ticket. Atomic JSON
+    // publication leaves no ownerless lock if the process exits mid-write.
+    await writeJsonAtomic(participantPath, { pid: process.pid, ticket: null });
+    const participants = await liveCanvasLockParticipants(lockDir);
+    const ticket = 1 + participants.reduce((maximum, owner) => Math.max(maximum, owner.ticket || 0), 0);
+    await writeJsonAtomic(participantPath, { pid: process.pid, ticket });
+    for (;;) {
+      const waiting = (await liveCanvasLockParticipants(lockDir)).some((owner) =>
+        owner.name !== name && (owner.ticket === null || owner.ticket < ticket || (owner.ticket === ticket && owner.name < name)),
+      );
+      if (!waiting) return async () => { await rm(participantPath, { force: true }); };
+      if (Date.now() - started >= LOCK_WAIT_MS) {
+        throw new Error("Cowart canvas is busy in another process. Please retry after that operation finishes.");
+      }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+  } catch (error) {
+    await rm(participantPath, { force: true });
+    throw error;
+  }
+}
+
+// Every read/modify/write operation uses the same canonical canvas key and
+// file lock, including separate MCP processes and full-snapshot widget saves.
+export async function withCowartCanvasTransaction(args, operation) {
+  await mkdir(resolveCanvasDir(args), { recursive: true });
+  const canvasDir = await realpath(resolveCanvasDir(args));
+  if (canvasTransactions.getStore()?.has(canvasDir)) return operation();
+  const previous = canvasQueues.get(canvasDir) || Promise.resolve();
+  let finish;
+  const queued = new Promise((resolveQueue) => { finish = resolveQueue; });
+  const tail = previous.then(() => queued);
+  canvasQueues.set(canvasDir, tail);
+  await previous;
+  try {
+    const release = await acquireCanvasFileLock(canvasDir);
+    try {
+      return await canvasTransactions.run(new Set([...(canvasTransactions.getStore() || []), canvasDir]), operation);
+    } finally { await release(); }
+  } finally {
+    finish();
+    if (canvasQueues.get(canvasDir) === tail) canvasQueues.delete(canvasDir);
+  }
+}
 
 const mimeTypes = new Map([
   [".apng", "image/apng"],
@@ -116,7 +206,7 @@ function isViewState(value) {
 
 function isSafeChildPath(parent, child) {
   const pathToChild = relative(parent, child);
-  return pathToChild && !pathToChild.startsWith("..") && !pathToChild.includes(`..${sep}`);
+  return Boolean(pathToChild && !isAbsolute(pathToChild) && pathToChild !== ".." && !pathToChild.startsWith(`..${sep}`));
 }
 
 function cloneJson(value) {
@@ -269,26 +359,43 @@ function parseDataUrl(src) {
   return { buffer, mimeType };
 }
 
-function localAssetFilePathFromUrl(src, args = {}) {
-  let route = null;
-  let baseDir = null;
-  if (src.startsWith(GLOBAL_ASSETS_ROUTE)) {
-    route = GLOBAL_ASSETS_ROUTE;
-    baseDir = canvasAssetsDir(args);
-  } else if (src.startsWith(PAGE_ASSETS_ROUTE)) {
-    const parts = src.slice(PAGE_ASSETS_ROUTE.length).split("/");
-    const pageDir = decodeURIComponent(parts.shift() ?? "");
-    if (!pageDir || parts.length === 0) return null;
-    const assetDir = join(canvasPagesDir(args), pageDir, "assets");
-    const filePath = resolve(assetDir, ...parts.map(decodeURIComponent));
-    return isSafeChildPath(assetDir, filePath) ? filePath : null;
-  } else {
-    return null;
+async function localAssetFilePathFromUrl(src, args = {}) {
+  if (typeof src !== "string") return null;
+  let assetDir;
+  let fileParts;
+  try {
+    if (src.startsWith(PAGE_ASSETS_ROUTE)) {
+      const parts = src.slice(PAGE_ASSETS_ROUTE.length).split("/");
+      const pageName = decodeURIComponent(parts.shift() ?? "");
+      if (!pageName || pageName === "." || pageName === ".." || /\0/.test(pageName)) return null;
+      // pageDirName stores the URI-encoded page name on disk. Decode the URL
+      // exactly once, then reconstruct that canonical directory component.
+      // Slashes in a legitimate page ID remain literal %2F in the directory;
+      // they never become filesystem separators.
+      assetDir = join(canvasPagesDir(args), pageDirName(`page:${pageName}`), "assets");
+      fileParts = parts.map(decodeURIComponent);
+    } else if (src.startsWith(GLOBAL_ASSETS_ROUTE)) {
+      assetDir = canvasAssetsDir(args);
+      fileParts = src.slice(GLOBAL_ASSETS_ROUTE.length).split("/").map(decodeURIComponent);
+    } else return null;
+  } catch (error) {
+    if (error instanceof URIError) return null;
+    throw error;
   }
-
-  const requestedPath = decodeURIComponent(src.slice(route.length));
-  const filePath = resolve(baseDir, requestedPath);
-  return isSafeChildPath(baseDir, filePath) ? filePath : null;
+  if (!fileParts.length || fileParts.some((part) => !part || part === "." || part === ".." || /[\\/\0]/.test(part))) return null;
+  const filePath = resolve(assetDir, ...fileParts);
+  const canvasDir = resolveCanvasDir(args);
+  if (!isSafeChildPath(canvasDir, assetDir) || !isSafeChildPath(assetDir, filePath)) return null;
+  try {
+    const [realCanvasDir, realAssetDir, realFilePath] = await Promise.all([
+      realpath(canvasDir), realpath(assetDir), realpath(filePath),
+    ]);
+    if (!isSafeChildPath(realCanvasDir, realAssetDir) || !isSafeChildPath(realAssetDir, realFilePath)) return null;
+    return realFilePath;
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR" || error?.code === "ELOOP") return null;
+    throw error;
+  }
 }
 
 function stringSet(value) {
@@ -321,7 +428,7 @@ async function hasRecoverableImagePayload(args, imageRef) {
   if (typeof imageRef.assetSrc !== "string") return false;
   if (imageRef.assetSrc.startsWith("data:")) return true;
 
-  const filePath = localAssetFilePathFromUrl(imageRef.assetSrc, args);
+  const filePath = await localAssetFilePathFromUrl(imageRef.assetSrc, args);
   if (!filePath) return false;
 
   try {
@@ -358,7 +465,7 @@ async function localizePageAsset(args, asset, pageId) {
 
   const localizedAsset = cloneJson(asset);
   const dataUrl = src.startsWith("data:") ? parseDataUrl(src) : null;
-  const sourceFilePath = dataUrl ? null : localAssetFilePathFromUrl(src, args);
+  const sourceFilePath = dataUrl ? null : await localAssetFilePathFromUrl(src, args);
   if (!dataUrl && !sourceFilePath) return localizedAsset;
 
   const fileName = sanitizeAssetFileName(
@@ -538,7 +645,7 @@ async function hydrateSnapshotAssets(args, snapshot) {
     const src = record.props?.src;
     if (typeof src !== "string" || src.startsWith("data:") || /^https?:\/\//.test(src)) continue;
 
-    const filePath = localAssetFilePathFromUrl(src, args);
+    const filePath = await localAssetFilePathFromUrl(src, args);
     if (!filePath) continue;
 
     try {
@@ -554,6 +661,37 @@ async function hydrateSnapshotAssets(args, snapshot) {
   }
 
   return { snapshot: hydrated, hydratedAssets };
+}
+
+// Older drafts duplicate their saved HTML (and often embedded images) as a
+// data URL in every full-document response. Replace that transport copy only
+// when the safe local file contains exactly the same bytes. Reading never
+// rewrites the user's canvas; a subsequent normal save can persist this URL.
+async function compactFileBackedHtmlDrafts(args, snapshot) {
+  if (!snapshot) return snapshot;
+  let compacted = snapshot;
+  for (const record of Object.values(snapshot.store)) {
+    if (record?.typeName !== "shape" || record.type !== "embed") continue;
+    const src = record.props?.url;
+    const assetUrl = record.meta?.cowartHtmlDraftAssetUrl;
+    if (!/^data:text\/html(?:;[^,]*)?,/i.test(String(src || "")) || typeof assetUrl !== "string") continue;
+    try {
+      const filePath = await localAssetFilePathFromUrl(assetUrl, args);
+      if (!filePath || !/\.html?$/i.test(filePath)) continue;
+      const inline = parseDataUrl(src);
+      if (!inline || !(await readFile(filePath)).equals(inline.buffer)) continue;
+      if (compacted === snapshot) compacted = { ...snapshot, store: { ...snapshot.store } };
+      compacted.store[record.id] = {
+        ...record,
+        meta: { ...record.meta, cowartHtmlDraftContentHash: createHash("sha256").update(inline.buffer).digest("hex") },
+        props: { ...record.props, url: `${HTML_DRAFT_URL_ORIGIN}${assetUrl}` },
+      };
+    } catch (_error) {
+      // Missing, inaccessible, changed or malformed files retain their complete
+      // inline fallback. Compaction must never discard the only valid content.
+    }
+  }
+  return compacted;
 }
 
 export async function writeCowartPageAsset(args = {}, options = {}) {
@@ -614,7 +752,7 @@ export async function readCowartPageAsset(args = {}, options = {}) {
     throw new Error(`Unsupported Cowart asset URL: ${assetUrl}`);
   }
 
-  const filePath = localAssetFilePathFromUrl(assetUrl, args);
+  const filePath = await localAssetFilePathFromUrl(assetUrl, args);
   if (!filePath) throw new Error(`Unsafe Cowart asset URL: ${assetUrl}`);
 
   const fileStat = await stat(filePath);
@@ -637,13 +775,33 @@ export async function readCowartPageAsset(args = {}, options = {}) {
   };
 }
 
-export async function readCowartCanvasState(args = {}, { hydrateAssets = false } = {}) {
-  const { projectDir, canvasDir } = resolveCowartPaths(args);
+export async function readCowartCanvasState(args = {}, options = {}) {
+  try {
+    await realpath(resolveCanvasDir(args));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    // A read of an unopened project stays read-only. Linearize this empty
+    // result before any writer creates the directory, rather than reading a
+    // potentially half-written document after that creation.
+    return canvasStateFromStoredSnapshot(args, {
+      snapshot: null, path: canvasPagesDir(args), storage: "empty",
+    }, options);
+  }
+  return withCowartCanvasTransaction(args, () => readCowartCanvasStateInTransaction(args, options));
+}
+
+async function readCowartCanvasStateInTransaction(args, options) {
   const loaded = await loadStoredCanvasSnapshot(args);
-  const revision = createHash("sha256").update(JSON.stringify(loaded.snapshot)).digest("hex");
+  return canvasStateFromStoredSnapshot(args, loaded, options);
+}
+
+async function canvasStateFromStoredSnapshot(args, loaded, { hydrateAssets = false } = {}) {
+  const { projectDir, canvasDir } = resolveCowartPaths(args);
+  const compacted = await compactFileBackedHtmlDrafts(args, loaded.snapshot);
+  const revision = canvasRevision(compacted);
   const hydrated = hydrateAssets
-    ? await hydrateSnapshotAssets(args, loaded.snapshot)
-    : { snapshot: loaded.snapshot, hydratedAssets: [] };
+    ? await hydrateSnapshotAssets(args, compacted)
+    : { snapshot: compacted, hydratedAssets: [] };
   const { viewState, viewStateFile } = await readCowartViewState(args);
 
   return {
@@ -661,7 +819,15 @@ export async function readCowartCanvasState(args = {}, { hydrateAssets = false }
   };
 }
 
+function canvasRevision(snapshot) {
+  return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+}
+
 export async function saveCowartCanvasSnapshot(args = {}, snapshot) {
+  return withCowartCanvasTransaction(args, () => saveCowartCanvasSnapshotInTransaction(args, snapshot));
+}
+
+async function saveCowartCanvasSnapshotInTransaction(args = {}, snapshot) {
   const { sanitizeCanvasSnapshotForTldraw } = await import("../../src/canvasSnapshot.js");
   const sanitized = sanitizeCanvasSnapshotForTldraw(snapshot);
   if (!sanitized.snapshot) {
@@ -674,6 +840,16 @@ export async function saveCowartCanvasSnapshot(args = {}, snapshot) {
   }
 
   const previous = await loadStoredCanvasSnapshot(args);
+  const previousRevision = canvasRevision(await compactFileBackedHtmlDrafts(args, previous.snapshot));
+  if (args.expectedRevision !== undefined && args.expectedRevision !== previousRevision) {
+    return {
+      ok: false,
+      storage: "revision-conflict",
+      paths: [],
+      revision: previousRevision,
+      message: "Cowart canvas changed since this snapshot was loaded. The current canvas was preserved; reload before saving.",
+    };
+  }
   const imageLosses = await getUnacknowledgedImageLosses(args, previous.snapshot, sanitized.snapshot);
   if (imageLosses.length > 0) {
     return {
@@ -686,10 +862,13 @@ export async function saveCowartCanvasSnapshot(args = {}, snapshot) {
     };
   }
 
-  const result = await saveStoredCanvasSnapshot(args, sanitized.snapshot);
+  const compacted = await compactFileBackedHtmlDrafts(args, sanitized.snapshot);
+  const result = await saveStoredCanvasSnapshot(args, compacted);
+  const persisted = await loadStoredCanvasSnapshot(args);
   return {
     ok: true,
     ...result,
+    revision: canvasRevision(await compactFileBackedHtmlDrafts(args, persisted.snapshot)),
     skippedRecords: sanitized.skippedRecords,
   };
 }

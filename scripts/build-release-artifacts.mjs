@@ -145,9 +145,26 @@ async function buildMcpAppsGlobalModule() {
     "};",
   ].join("");
 
+  // ext-apps logs complete JSON-RPC requests/responses with console.debug.
+  // Chromium retains console arguments, including megabytes of base64 image
+  // data, after the frontend releases them. Remove those debug calls from the
+  // packaged SDK while preserving warnings/errors and the original SDK logic.
+  const browserBundle = await esbuild({
+    stdin: { contents: globalScript, loader: "js" },
+    format: "iife",
+    target: "es2022",
+    minify: true,
+    pure: ["console.debug"],
+    charset: "utf8",
+    supported: { "template-literal": false },
+    legalComments: "eof",
+    write: false,
+    logLevel: "warning",
+  });
+
   return [
     `// ${GENERATED_HEADER}`,
-    `export const MCP_APPS_GLOBAL_SCRIPT = ${JSON.stringify(globalScript)};`,
+    `export const MCP_APPS_GLOBAL_SCRIPT = ${JSON.stringify(browserBundle.outputFiles[0].text)};`,
     "",
   ].join("\n");
 }

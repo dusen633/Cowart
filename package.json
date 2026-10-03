@@ -1,11 +1,11 @@
 {
   "name": "cowart-canvas",
-  "version": "0.1.34",
+  "version": "0.1.35",
   "private": true,
   "type": "module",
   "scripts": {
     "check:plugin": "node ./scripts/check-plugin-metadata.mjs && node ./scripts/check-agent-plugin.mjs",
-    "check": "node --check ./mcp/server.mjs && node --check ./mcp/lib/plugin-root.mjs && node --check ./mcp/lib/widget-resource.mjs && node --check ./mcp/lib/cowart-static-widget.mjs && node --check ./mcp/lib/canvas-storage.mjs && node --check ./mcp/lib/ga4-analytics.mjs && node --check ./mcp/lib/posthog-analytics.mjs && node --check ./src/analytics.js && node --check ./scripts/build-release-artifacts.mjs && node --check ./scripts/probe-cold-install.mjs && node --check ./scripts/probe-analytics.mjs && node --check ./scripts/probe-ga4.mjs && node --check ./scripts/probe-posthog.mjs && node --check ./scripts/probe-mcp.mjs && node --check ./scripts/start-mcp.mjs && node --check ./scripts/vite-build-once.mjs && node --check ./mcp/generated/cowart-mcp.mjs && node --check ./src/widgetStartup.js && node --check ./src/cowartClient.js && node --check ./scripts/probe-widget-startup.mjs && node --check ./scripts/probe-widget-sync.mjs && node --check ./mcp/lib/project-launcher.mjs && node --check ./scripts/probe-launcher.mjs && node --check ./src/html2canvasClipFix.js && node --check ./src/htmlDraftCapture.js && node --check ./scripts/probe-html-draft-capture.mjs && node --check ./scripts/probe-html-draft-capture-browser.mjs && node --check ./scripts/fixtures/html-draft-capture-browser.js && node --check ./src/filmAnalytics.js && node --check ./mcp/lib/film-analytics.mjs && node --check ./scripts/probe-film-analytics.mjs && node --check ./src/filmPlayback.js && node --check ./src/filmConfig.js && node --check ./scripts/probe-film-playback.mjs && node --check ./src/filmExport.js && node --check ./scripts/probe-film-export-browser.mjs && node --check ./scripts/fixtures/film-export-browser.js && node --check ./src/filmFrameReady.js && node --check ./src/filmTimeline.js && node --check ./src/filmVideoFrames.js && node --check ./scripts/probe-film-render.mjs",
+    "check": "node --check ./mcp/server.mjs && node --check ./mcp/lib/plugin-root.mjs && node --check ./mcp/lib/widget-resource.mjs && node --check ./mcp/lib/cowart-static-widget.mjs && node --check ./mcp/lib/canvas-storage.mjs && node --check ./mcp/lib/ga4-analytics.mjs && node --check ./mcp/lib/posthog-analytics.mjs && node --check ./src/analytics.js && node --check ./scripts/build-release-artifacts.mjs && node --check ./scripts/probe-cold-install.mjs && node --check ./scripts/probe-analytics.mjs && node --check ./scripts/probe-ga4.mjs && node --check ./scripts/probe-posthog.mjs && node --check ./scripts/probe-mcp.mjs && node --check ./scripts/start-mcp.mjs && node --check ./scripts/vite-build-once.mjs && node --check ./mcp/generated/cowart-mcp.mjs && node --check ./src/widgetStartup.js && node --check ./src/cowartClient.js && node --check ./scripts/probe-widget-startup.mjs && node --check ./scripts/probe-widget-sync.mjs && node --check ./mcp/lib/project-launcher.mjs && node --check ./scripts/probe-launcher.mjs && node --check ./src/html2canvasClipFix.js && node --check ./src/htmlDraftCapture.js && node --check ./scripts/probe-html-draft-capture.mjs && node --check ./scripts/probe-html-draft-capture-browser.mjs && node --check ./scripts/fixtures/html-draft-capture-browser.js && node --check ./src/filmAnalytics.js && node --check ./mcp/lib/film-analytics.mjs && node --check ./scripts/probe-film-analytics.mjs && node --check ./src/filmPlayback.js && node --check ./src/filmConfig.js && node --check ./scripts/probe-film-playback.mjs && node --check ./src/filmExport.js && node --check ./scripts/probe-film-export-browser.mjs && node --check ./scripts/fixtures/film-export-browser.js && node --check ./src/filmFrameReady.js && node --check ./src/filmTimeline.js && node --check ./src/filmVideoFrames.js && node --check ./scripts/probe-film-render.mjs && node --check ./scripts/probe-mcp-integrity.mjs && node --check ./src/cowartAssetCache.js && node --check ./scripts/probe-widget-memory.mjs && node --check ./scripts/probe-widget-browser.mjs",
     "dev": "vite",
     "build:web": "node ./scripts/vite-build-once.mjs",
     "build:artifacts": "node ./scripts/build-release-artifacts.mjs",
@@ -18,7 +18,7 @@
     "probe:analytics": "node ./scripts/probe-analytics.mjs",
     "probe:ga4": "node ./scripts/probe-ga4.mjs",
     "probe:posthog": "node ./scripts/probe-posthog.mjs",
-    "quality": "npm run check:plugin && npm run check && npm run check:artifacts && npm run probe:mcp:cold && npm run probe:mcp && npm run probe:launcher && npm run probe:widget:startup && npm run probe:widget:sync && npm run probe:analytics && npm run probe:ga4 && npm run probe:posthog && npm run probe:html:capture && npm run probe:film && npm run probe:film:render",
+    "quality": "npm run check:plugin && npm run check && npm run check:artifacts && npm run probe:mcp:cold && npm run probe:mcp && npm run probe:mcp:integrity && npm run probe:launcher && npm run probe:widget:startup && npm run probe:widget:sync && npm run probe:widget:memory && npm run probe:analytics && npm run probe:ga4 && npm run probe:posthog && npm run probe:html:capture && npm run probe:film && npm run probe:film:render",
     "probe:widget:startup": "node ./scripts/probe-widget-startup.mjs",
     "probe:widget:sync": "node ./scripts/probe-widget-sync.mjs",
     "probe:launcher": "node ./scripts/probe-launcher.mjs",
@@ -26,7 +26,10 @@
     "probe:html:capture:browser": "node ./scripts/probe-html-draft-capture-browser.mjs",
     "probe:film": "node ./scripts/probe-film-playback.mjs && node ./scripts/probe-film-analytics.mjs",
     "probe:film:export:browser": "node ./scripts/probe-film-export-browser.mjs",
-    "probe:film:render": "node ./scripts/probe-film-render.mjs"
+    "probe:film:render": "node ./scripts/probe-film-render.mjs",
+    "probe:mcp:integrity": "node ./scripts/probe-mcp-integrity.mjs",
+    "probe:widget:memory": "node ./scripts/probe-widget-memory.mjs",
+    "probe:widget:browser": "node ./scripts/probe-widget-browser.mjs"
   },
   "devDependencies": {
     "@modelcontextprotocol/ext-apps": "^1.7.4",

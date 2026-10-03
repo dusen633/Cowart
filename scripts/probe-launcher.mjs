@@ -57,6 +57,7 @@ try {
   assert.equal(direct.structuredContent.globalWorkspace, undefined)
   assert.equal(direct.structuredContent.canvasState.snapshot, null)
   assert.deepEqual(direct.structuredContent.canvasState.viewState.camera, { x: 0, y: 0, z: 1 })
+  await assert.rejects(stat(join(projectDir, 'canvas')), { code: 'ENOENT' }, 'Reading an unopened project must not create its canvas directory')
   await assert.rejects(stat(documentsDir), { code: 'ENOENT' })
 
   await writeFile(documentsDir, 'Documents is unavailable')

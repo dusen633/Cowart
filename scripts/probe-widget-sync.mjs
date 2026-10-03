@@ -12,6 +12,12 @@ const start = source.indexOf(marker) + marker.length
 const end = source.indexOf('  }, [viewState])', start)
 assert.ok(start >= marker.length && end > start, 'Cannot find the canvas mount callback')
 const mount = new vm.Script(`(${source.slice(start, end)}  })`)
+const changedStoreStart = source.indexOf('function storeChangedSinceSnapshot(')
+const changedStoreEnd = source.indexOf('function applyRemoteCanvasSnapshot(', changedStoreStart)
+assert.ok(changedStoreStart >= 0 && changedStoreEnd > changedStoreStart, 'Cannot find the document comparison helper')
+const storeChangedSinceSnapshot = new vm.Script(`(${source.slice(changedStoreStart, changedStoreEnd)})`).runInNewContext({
+  recordsAreEqual: (left, right) => JSON.stringify(left) === JSON.stringify(right)
+})
 
 function deferred() {
   let resolve, reject
@@ -22,11 +28,13 @@ function deferred() {
 function fixture() {
   let now = 0, nextId = 0
   const timers = new Map(), ownedTimers = new Set()
-  const calls = { selection: [], view: [], refresh: [], dom: [], applied: [], errors: [] }
+  const calls = { selection: [], view: [], refresh: [], dom: [], applied: [], errors: [], accepted: [], canvas: [], downloads: [], loaded: [], historyCleared: [] }
   const state = {
     selection: { selectedShapes: [] },
     view: { version: 1, currentPageId: 'page:one', camera: { x: 0, y: 0, z: 1 } },
-    saveSelection: async () => {}, saveView: async () => {}, refresh: async () => ({ store: {} })
+    saveSelection: async () => {}, saveView: async () => {}, refresh: async () => ({ store: {} }),
+    saveCanvas: async () => ({ ok: true }), download: async () => ({ ok: true }), loadSnapshot: () => {},
+    applyRemote: () => ({ changedRecords: 0 }), snapshot: { schema: {}, store: {} }
   }
   const noOp = () => {}
   function timer(callback, delay, interval = 0) {
@@ -38,7 +46,17 @@ function fixture() {
     setTimeout: (callback, delay) => timer(callback, delay), clearTimeout: (id) => timers.delete(id),
     setInterval: (callback, delay) => timer(callback, delay, delay), clearInterval: (id) => timers.delete(id)
   }
-  const doc = { addEventListener: noOp, removeEventListener: noOp, getElementById: () => ({ remove: noOp }) }
+  function element(tag) {
+    return { tag, style: {}, children: [], handlers: {}, disabled: false,
+      setAttribute: noOp, addEventListener(name, handler) { this.handlers[name] = handler },
+      append(...children) { this.children.push(...children) }, appendChild(child) { this.children.push(child) },
+      remove() { this.removed = true }
+    }
+  }
+  const doc = { addEventListener: noOp, removeEventListener: noOp, getElementById: () => ({ remove: noOp }),
+    createElement: element, body: element('body') }
+  let documentListener
+
   const editor = {
     timers: {
       requestAnimationFrame: noOp,
@@ -46,8 +64,15 @@ function fixture() {
     },
     inputs: { getIsDragging: () => false }, run: (callback) => callback(),
     on: noOp, off: noOp, getContainerDocument: () => doc,
+    clearHistory() { calls.historyCleared.push(state.snapshot) },
     sideEffects: { registerBeforeCreateHandler: () => noOp, registerOperationCompleteHandler: () => noOp },
-    store: { listen: () => noOp, getStoreSnapshot: () => ({ store: {} }) }
+    store: {
+      listen(callback, options) { if (options?.source === 'user' && options?.scope === 'document') documentListener = callback; return noOp },
+      getStoreSnapshot: () => state.snapshot,
+      mergeRemoteChanges(callback) { callback() },
+      loadStoreSnapshot(snapshot) { state.loadSnapshot(snapshot); calls.loaded.push(snapshot); state.snapshot = snapshot },
+      ensureStoreIsUsable: noOp
+    }
   }
   class ClockDate extends Date { constructor() { super(now) } }
   const disposeMount = mount.runInNewContext({
@@ -56,17 +81,31 @@ function fixture() {
     SELECTION_STATE_ELEMENT_ID: 'selection-state',
     reportCowartStartup: noOp, trackCanvasOpened: noOp, restoreCowartViewState: noOp,
     getCowartSelectionSnapshot: () => structuredClone(state.selection),
+    getCowartSelectionRecords: () => JSON.stringify(state.selection),
+    cowartSelectionRecordsEqual: (left, right) => left === right,
     getCowartViewState: () => structuredClone(state.view),
     writeCowartSelectionState: (snapshot) => calls.dom.push(snapshot),
     saveCowartSelectionState: (snapshot) => { calls.selection.push(snapshot); return state.saveSelection(snapshot) },
     saveCowartViewState: (snapshot) => { calls.view.push(snapshot); return state.saveView(snapshot) },
     refreshCowartCanvasSnapshot: (signal) => { calls.refresh.push(signal); return state.refresh(signal) },
-    applyRemoteCanvasSnapshot: (_editor, snapshot) => { calls.applied.push(snapshot); return { changedRecords: 0 } },
-    storeChangedSinceSnapshot: () => false, hasCowartWidgetBridge: () => true,
+    acceptCowartCanvasSnapshot: (snapshot) => calls.accepted.push(snapshot),
+    saveCowartCanvasSnapshot: (snapshot) => {
+      const savingSnapshot = typeof snapshot === 'function' ? snapshot() : snapshot
+      calls.canvas.push(savingSnapshot)
+      return state.saveCanvas(savingSnapshot)
+    },
+    downloadCowartFile: (download) => { calls.downloads.push(download); return state.download(download) },
+    sanitizeCanvasSnapshotForTldraw: (snapshot) => ({ snapshot, skippedRecords: [] }),
+    collectRemovedImageShapeIds: () => [],
+    applyRemoteCanvasSnapshot: (_editor, snapshot) => { calls.applied.push(snapshot); return state.applyRemote(snapshot) },
+    storeChangedSinceSnapshot, hasCowartWidgetBridge: () => true,
+    retainCowartEditorAssets: noOp, cowartAssetReferencesChanged: () => false,
+    revokeCowartAssetObjectUrls: noOp,
     normalizeAiDraftHolderLabels: noOp, adoptGeneratedAiSlidesItems: noOp, layoutAllAiSlides: noOp
   })(editor)
   return {
-    state, calls,
+    state, calls, doc,
+    change(snapshot = state.snapshot) { state.snapshot = snapshot; documentListener({ changes: {} }) },
     async advance(ms) {
       const target = now + ms
       await flush()
@@ -178,6 +217,36 @@ test('slow canvas refresh stays single flight and resumes after completion', asy
   f.dispose()
 })
 
+test('unchanged remote snapshots reconcile once across idle polling', async () => {
+  const f = fixture()
+  const remote = { schema: {}, store: {} }
+  f.state.refresh = async () => remote
+  await f.advance(30 * 60 * 1000)
+  assert.equal(f.calls.refresh.length, 1125)
+  assert.equal(f.calls.applied.length, 1, 'An unchanged revision must not allocate another validation store')
+  assert.equal(f.calls.accepted.length, 1)
+  const changed = { schema: {}, store: { external: { id: 'external' } } }
+  f.state.refresh = async () => changed
+  await f.advance(1600)
+  assert.equal(f.calls.applied.length, 2)
+  assert.equal(f.calls.applied.at(-1), changed)
+  f.dispose()
+})
+
+test('partially rejected remote snapshots keep retrying until fully applied', async () => {
+  const f = fixture(), remote = { schema: {}, store: {} }
+  f.state.refresh = async () => remote
+  f.state.applyRemote = () => ({ changedRecords: 1, skippedRecords: [{ id: 'shape:retry' }] })
+  await f.advance(3200)
+  assert.equal(f.calls.applied.length, 2)
+  assert.equal(f.calls.accepted.length, 0, 'A partial apply must not advance the save baseline')
+  f.state.applyRemote = () => ({ changedRecords: 1, skippedRecords: [] })
+  await f.advance(3200)
+  assert.equal(f.calls.applied.length, 3)
+  assert.equal(f.calls.accepted.length, 1)
+  f.dispose()
+})
+
 test('unmount aborts a pending refresh and discards a late response', async () => {
   const f = fixture(), refresh = deferred()
   f.state.refresh = () => refresh.promise
@@ -190,4 +259,151 @@ test('unmount aborts a pending refresh and discards a late response', async () =
   assert.equal(f.calls.applied.length, 0)
   assert.equal(f.calls.refresh.length, 1)
   assert.equal(f.pendingTimers, 0)
+})
+
+
+test('dirty canvas polling never advances its applied save baseline', async () => {
+  const f = fixture()
+  const saving = deferred()
+  f.state.saveCanvas = () => saving.promise
+  f.change({ schema: {}, store: { local: { id: 'local' } } })
+  await f.advance(2000)
+  assert.equal(f.calls.canvas.length, 1)
+  assert.equal(f.calls.refresh.length, 1)
+  assert.equal(f.calls.accepted.length, 0)
+  saving.resolve({ ok: true })
+  await flush()
+  f.dispose()
+})
+
+test('save conflict keeps local edits, stops retrying, and requires a successful current backup before loading latest', async () => {
+  const f = fixture()
+  const local = { schema: {}, store: { local: { id: 'local' } } }
+  const latest = { schema: {}, store: { remote: { id: 'remote' } } }
+  f.state.saveCanvas = async () => { throw Object.assign(new Error('Canvas changed'), { storage: 'revision-conflict' }) }
+  f.change(local)
+  await f.advance(10000)
+  assert.equal(f.calls.canvas.length, 1, 'A conflict must not become a retry loop')
+  assert.equal(f.state.snapshot, local)
+  assert.equal(f.calls.loaded.length, 0)
+  const notice = f.doc.body.children[0]
+  const [message, backup, reload] = notice.children
+  assert.equal(reload.disabled, true)
+  f.state.download = async () => { throw new Error('download failed') }
+  await backup.handlers.click()
+  assert.equal(reload.disabled, true)
+  assert.match(message.textContent, /备份失败/)
+  assert.equal(f.calls.historyCleared.length, 0, 'A failed backup must preserve local undo history')
+  f.state.download = async () => ({ ok: true })
+  await backup.handlers.click()
+  assert.equal(reload.disabled, false)
+  assert.equal(JSON.parse(decodeURIComponent(f.calls.downloads.at(-1).dataUrl.split(',').slice(1).join(','))).store.local.id, 'local')
+  f.change({ schema: {}, store: { local: { id: 'local', editedAgain: true } } })
+  assert.equal(reload.disabled, true, 'Changes after a backup require a new backup')
+  await backup.handlers.click()
+  assert.equal(reload.disabled, false)
+  f.state.refresh = async () => latest
+  await reload.handlers.click()
+  assert.equal(f.calls.loaded[0], latest)
+  assert.deepEqual(f.calls.historyCleared, [latest], 'Clear old undo history only after loading the latest document')
+  assert.equal(f.calls.accepted.at(-1), latest)
+  assert.equal(notice.removed, true)
+  f.state.saveCanvas = async () => ({ ok: true })
+  f.change({ ...latest, store: { remote: { id: 'remote', edited: true } } })
+  await f.advance(500)
+  assert.equal(f.calls.canvas.length, 2, 'Normal saves resume after safely loading the latest canvas')
+  f.dispose()
+})
+
+test('failed conflict refresh or snapshot load keeps local history until successful recovery', async () => {
+  const f = fixture()
+  const local = { schema: {}, store: { local: { id: 'local' } } }
+  const latest = { schema: {}, store: { remote: { id: 'remote' } } }
+  f.state.saveCanvas = async () => { throw Object.assign(new Error('Canvas changed'), { storage: 'revision-conflict' }) }
+  f.change(local)
+  await f.advance(500)
+  const [message, backup, reload] = f.doc.body.children[0].children
+  await backup.handlers.click()
+  f.state.refresh = async () => { throw new Error('read failed') }
+  await reload.handlers.click()
+  assert.match(message.textContent, /加载失败/)
+  assert.equal(f.state.snapshot, local)
+  assert.equal(f.calls.historyCleared.length, 0, 'A failed refresh must preserve local undo history')
+  assert.equal(f.calls.accepted.length, 0)
+  f.state.refresh = async () => latest
+  f.state.loadSnapshot = () => { throw new Error('load failed') }
+  await reload.handlers.click()
+  assert.match(message.textContent, /load failed/)
+  assert.equal(f.state.snapshot, local)
+  assert.equal(f.calls.historyCleared.length, 0, 'A failed document load must preserve local undo history')
+  assert.equal(f.calls.accepted.length, 0)
+  f.state.loadSnapshot = () => {}
+  await reload.handlers.click()
+  assert.deepEqual(f.calls.historyCleared, [latest])
+  assert.equal(f.calls.accepted.at(-1), latest)
+  f.dispose()
+})
+
+test('changes during a conflict reload are preserved instead of being replaced', async () => {
+  const f = fixture()
+  f.state.saveCanvas = async () => { throw Object.assign(new Error('Canvas changed'), { storage: 'revision-conflict' }) }
+  f.change()
+  await f.advance(500)
+  const [, backup, reload] = f.doc.body.children[0].children
+  await backup.handlers.click()
+  const refreshing = deferred()
+  f.state.refresh = () => refreshing.promise
+  const loading = reload.handlers.click()
+  const newestLocal = { schema: {}, store: { local: { id: 'local', duringReload: true } } }
+  f.change(newestLocal)
+  refreshing.resolve({ schema: {}, store: { remote: { id: 'remote' } } })
+  await loading
+  assert.equal(f.calls.loaded.length, 0)
+  assert.equal(f.state.snapshot, newestLocal)
+  assert.equal(reload.disabled, true)
+  f.dispose()
+})
+
+test('changes before the document listener flushes invalidate a pending conflict backup', async () => {
+  const f = fixture()
+  f.state.saveCanvas = async () => { throw Object.assign(new Error('Canvas changed'), { storage: 'revision-conflict' }) }
+  f.change({ schema: {}, store: { local: { id: 'local' } } })
+  await f.advance(500)
+  const [, backup, reload] = f.doc.body.children[0].children
+  const downloading = deferred()
+  f.state.download = () => downloading.promise
+  const savingBackup = backup.handlers.click()
+  // A tldraw document change is immediately visible in the store, while the
+  // user document listener is deferred until the next frame.
+  const newestLocal = { schema: {}, store: { local: { id: 'local', beforeListenerFlush: true } } }
+  f.state.snapshot = newestLocal
+  downloading.resolve({ ok: true })
+  await savingBackup
+  assert.equal(reload.disabled, true, 'An older backup must not authorize replacing a newer document')
+  await reload.handlers.click()
+  assert.equal(f.calls.refresh.length, 0)
+  assert.equal(f.calls.loaded.length, 0)
+  assert.equal(f.state.snapshot, newestLocal)
+  f.dispose()
+})
+
+test('changes before the document listener flushes are preserved during conflict reload', async () => {
+  const f = fixture()
+  f.state.saveCanvas = async () => { throw Object.assign(new Error('Canvas changed'), { storage: 'revision-conflict' }) }
+  f.change({ schema: {}, store: { local: { id: 'local' } } })
+  await f.advance(500)
+  const [, backup, reload] = f.doc.body.children[0].children
+  await backup.handlers.click()
+  const refreshing = deferred()
+  f.state.refresh = () => refreshing.promise
+  const loading = reload.handlers.click()
+  const newestLocal = { schema: {}, store: { local: { id: 'local', beforeListenerFlush: true } } }
+  f.state.snapshot = newestLocal
+  refreshing.resolve({ schema: {}, store: { remote: { id: 'remote' } } })
+  await loading
+  assert.equal(f.calls.loaded.length, 0, 'A delayed listener must not allow a new local edit to be replaced')
+  assert.equal(f.state.snapshot, newestLocal)
+  assert.equal(reload.disabled, true)
+  assert.equal(f.calls.accepted.length, 0)
+  f.dispose()
 })

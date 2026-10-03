@@ -38,6 +38,10 @@ const script = (id) => {
 const bootstrap = script('cowartStartupDiagnostics')
 const displayModeScript = script('cowartInitialDisplayMode')
 const bridge = script('cowartMcpHostBridge')
+const sdkSource = scripts.find(([, attrs]) => attrs.includes('id="cowartMcpAppsBundle"'))?.[2]
+assert.ok(sdkSource, 'The release resource must include the standalone MCP Apps SDK')
+assert.doesNotMatch(sdkSource, /console\.debug\s*\(/, 'SDK debug logs must not retain full JSON-RPC asset payloads')
+assert.ok(!sdkSource.includes('Parsed message'), 'Parsed asset responses must not be retained as console arguments')
 const clientBundle = await build({
   absWorkingDir: root,
   entryPoints: ['src/cowartClient.js'],
@@ -353,6 +357,22 @@ test('canvas refresh forwards cancellation through the release bridge', async ()
   h.assertClean()
 })
 
+test('server tool deadlines belong to the SDK rather than abandoned promise races', async () => {
+  const h = harness()
+  await h.ready()
+  const deadlines = []
+  h.context.__COWART_MCP_APP__.callServerTool = async (_request, options) => {
+    deadlines.push(options.timeout)
+    assert.equal(h.timers.size, 0, 'No separate deadline may abandon the SDK request')
+    return { structuredContent: { ok: true } }
+  }
+  await h.window.cowartMcp.callServerTool({ name: 'get_cowart_canvas_state' })
+  await h.window.cowartMcp.callServerTool({ name: 'get_cowart_canvas_state' }, { timeoutMs: 7000 })
+  await h.window.cowartMcp.callServerTool({ name: 'get_cowart_canvas_state' }, { timeout: 9000 })
+  assert.deepEqual(deadlines, [30000, 7000, 9000])
+  h.assertClean()
+})
+
 test('conditional refresh reuses one snapshot and advances its revision after a remote edit', async () => {
   const h = harness()
   await h.ready()
@@ -482,5 +502,81 @@ test('host placement is respected when already fullscreen or fullscreen is unava
   await h.ready()
   assert.equal(h.window.openai.displayMode, 'inline')
   assert.equal(h.displayRequests.length, 1)
+  h.assertClean()
+})
+
+
+test('widget saves use the applied revision, not a dirty polling response, and expose CAS conflicts', async () => {
+  const h = harness()
+  await h.ready()
+  const baseline = { schema: {}, store: {} }
+  const remote = { schema: {}, store: { remote: { id: 'remote' } } }
+  h.result({ projectDir: '/startup-probe/project', canvasState: { snapshot: baseline, revision: 'one' } })
+  await h.load()
+  const requests = []
+  let saveAllowed = false
+  h.context.__COWART_MCP_APP__.callServerTool = async (request) => {
+    requests.push(request)
+    if (request.name === 'get_cowart_canvas_state') return { structuredContent: { snapshot: remote, revision: 'two' } }
+    if (!saveAllowed) return { isError: true, content: [{ type: 'text', text: 'Canvas changed' }],
+      structuredContent: { ok: false, storage: 'revision-conflict', revision: 'two' } }
+    return { structuredContent: { ok: true, revision: 'three' } }
+  }
+  const polled = await h.context.cowartClient.refreshCowartCanvasSnapshot()
+  await assert.rejects(h.context.cowartClient.saveCowartCanvasSnapshot(baseline), (error) => error.storage === 'revision-conflict')
+  assert.equal(requests.at(-1).arguments.expectedRevision, 'one', 'An unapplied poll must not authorize an old full snapshot')
+  h.context.cowartClient.acceptCowartCanvasSnapshot(polled)
+  saveAllowed = true
+  await h.context.cowartClient.saveCowartCanvasSnapshot(remote)
+  assert.equal(requests.at(-1).arguments.expectedRevision, 'two')
+  await h.context.cowartClient.saveCowartCanvasSnapshot(remote)
+  assert.equal(requests.at(-1).arguments.expectedRevision, 'three')
+  h.assertClean()
+})
+
+test('HTML delta acceptance never rolls back a revision applied while the tool was pending', async () => {
+  const h = harness()
+  await h.ready()
+  const baseline = { schema: {}, store: { draft: { id: 'draft', meta: {} } } }
+  const remote = { schema: {}, store: { draft: { id: 'draft', meta: { changed: true } }, inserted: { id: 'inserted' } } }
+  h.result({ projectDir: '/startup-probe/project', canvasState: { snapshot: baseline, revision: 'one' } })
+  await h.load()
+  let resolveHtml
+  const html = new Promise((resolve) => { resolveHtml = resolve })
+  const requests = []
+  h.context.__COWART_MCP_APP__.callServerTool = async (request) => {
+    requests.push(request)
+    if (request.name === 'insert_cowart_html_draft') return html
+    if (request.name === 'get_cowart_canvas_state') return { structuredContent: { snapshot: remote, revision: 'three' } }
+    return { structuredContent: { ok: true, revision: 'four' } }
+  }
+  let appliedDeltas = 0
+  const editing = h.context.cowartClient.updateCowartHtmlDraft({ draftShapeId: 'draft', htmlContent: '<html>edit</html>' }, {
+    applyResult() { appliedDeltas++; return true },
+  })
+  await flush()
+  assert.equal(requests[0].arguments.expectedRevision, 'one')
+  const polled = await h.context.cowartClient.refreshCowartCanvasSnapshot()
+  h.context.cowartClient.acceptCowartCanvasSnapshot(polled)
+  resolveHtml({ structuredContent: { shapeId: 'draft', shapeRecord: { id: 'draft', meta: { changed: true } }, previousRevision: 'one', revision: 'two' } })
+  await editing
+  assert.equal(appliedDeltas, 0, 'A delayed HTML delta must not overwrite metadata from a newer applied revision')
+  await h.context.cowartClient.saveCowartCanvasSnapshot(remote)
+  assert.equal(requests.at(-1).arguments.expectedRevision, 'three', 'An older known delta must not replace an already applied newer baseline')
+  h.assertClean()
+})
+
+test('local development HTML edits still apply their saved result', async () => {
+  const h = harness()
+  await h.ready()
+  delete h.window.cowartMcp
+  const saved = { assetUrl: '/page-assets/page/draft.html', contentHash: 'edited' }
+  h.window.fetch = async () => ({ ok: true, json: async () => saved })
+  let applied
+  const result = await h.context.cowartClient.updateCowartHtmlDraft({ draftShapeId: 'draft', htmlContent: '<html>edit</html>' }, {
+    applyResult(value) { applied = value; return true },
+  })
+  assert.equal(result, saved)
+  assert.equal(applied, saved)
   h.assertClean()
 })

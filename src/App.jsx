@@ -61,6 +61,7 @@ import {
 import { getAssetUrlsByImport } from '@tldraw/assets/imports.vite'
 import { AllSelection } from '@tiptap/pm/state'
 import { renderHtmlDraftDocument } from './htmlDraftCapture.js'
+import { cowartAssetCacheKey, cowartBlobFromBase64, createCowartAssetObjectUrlCache } from './cowartAssetCache.js'
 import { attachCowartFilmController } from './filmPlayback.js'
 import { renderCowartFilmMp4 } from './filmExport.js'
 import { getFilmOptions, buildFilmGenerationPrompt } from './filmConfig.js'
@@ -85,6 +86,7 @@ import {
 } from './analytics.js'
 import {
   IS_COWART_WIDGET_BUILD,
+  acceptCowartCanvasSnapshot,
   copyCowartImageToClipboard,
   downloadCowartFile,
   hasCowartWidgetBridge,
@@ -317,8 +319,13 @@ const iconSvgSources = import.meta.glob(
   { eager: true, query: '?raw', import: 'default' }
 )
 const cowartAssetUrls = buildCowartAssetUrls()
-const cowartAssetObjectUrlCache = new Map()
-const cowartAssetSourceKeys = new Map()
+const cowartAssetObjectUrlCache = createCowartAssetObjectUrlCache({
+  getKey: (asset) => `${window.openai?.toolOutput?.canvasDir || window.openai?.toolOutput?.projectDir || ''}\u001e${cowartAssetCacheKey(asset)}`,
+  async load(asset, signal) {
+    const pageAsset = await readCowartPageAsset(asset.props.src, { signal })
+    return blobFromBase64(pageAsset.dataBase64, pageAsset.mimeType)
+  }
+})
 const cowartHtmlDraftIframes = new Map()
 const cowartHtmlDraftDomEditSessions = new Map()
 const cowartFilmControllers = new Map()
@@ -357,7 +364,7 @@ function isCowartLocalAssetUrl(src) {
 const COWART_HTML_DRAFT_LOCAL_IMAGE_PATTERN =
   /(?:https?:\/\/cowart\.local)?(\/(?:page-assets|assets)\/[^"'()\s<>?#]+\.(?:apng|avif|gif|jpe?g|png|svg|webp))(?:[?#][^"'()\s<>]*)?/gi
 
-async function hydrateCowartHtmlDraftLocalImages(htmlContent) {
+async function hydrateCowartHtmlDraftLocalImages(htmlContent, options = {}) {
   if (typeof htmlContent !== 'string' || !htmlContent || !hasCowartWidgetBridge()) return htmlContent
 
   const references = new Map()
@@ -366,23 +373,25 @@ async function hydrateCowartHtmlDraftLocalImages(htmlContent) {
   }
   if (!references.size) return htmlContent
 
-  const replacements = await Promise.all(
-    Array.from(references.entries()).map(async ([reference, assetUrl]) => {
-      try {
-        const asset = await readCowartPageAsset(assetUrl)
-        if (!asset?.dataBase64 || !asset?.mimeType?.startsWith('image/')) return null
-        return [reference, `data:${asset.mimeType};base64,${asset.dataBase64}`]
-      } catch (error) {
-        console.warn(`Cowart could not hydrate HTML draft image ${assetUrl}.`, error)
-        return null
+  const replacements = new Map()
+  // HTML can contain several full-resolution references. Read each file once
+  // and sequentially so the bridge does not hold every base64 response at once.
+  for (const assetUrl of new Set(references.values())) {
+    try {
+      options.signal?.throwIfAborted()
+      const asset = await readCowartPageAsset(assetUrl, options)
+      if (asset?.dataBase64 && asset?.mimeType?.startsWith('image/')) {
+        replacements.set(assetUrl, `data:${asset.mimeType};base64,${asset.dataBase64}`)
       }
-    })
-  )
+    } catch (error) {
+      if (error.name === 'AbortError') throw error
+      console.warn(`Cowart could not hydrate HTML draft image ${assetUrl}.`, error)
+    }
+  }
 
-  return replacements.filter(Boolean).reduce(
-    (result, [reference, dataUrl]) => result.split(reference).join(dataUrl),
-    htmlContent
-  )
+  // Build one hydrated document, avoiding a full intermediate copy per image.
+  return htmlContent.replace(COWART_HTML_DRAFT_LOCAL_IMAGE_PATTERN,
+    (reference) => replacements.get(references.get(reference)) || reference)
 }
 
 function isCowartHtmlDraftAssetUrl(src) {
@@ -412,43 +421,29 @@ function cowartHtmlDraftVirtualUrl(assetUrl) {
   return normalizedAssetUrl ? `${COWART_HTML_DRAFT_URL_ORIGIN}${normalizedAssetUrl}` : ''
 }
 
-function cowartAssetCacheKey(asset) {
-  const src = asset?.props?.src ?? ''
-  const fileSize = asset?.props?.fileSize ?? ''
-  const mimeType = asset?.props?.mimeType ?? ''
-  const name = asset?.props?.name ?? ''
-  return [src, fileSize, mimeType, name].join('\u001f')
-}
-
-function revokeCowartCachedAsset(cacheKey) {
-  const cached = cowartAssetObjectUrlCache.get(cacheKey)
-  if (!cached) return
-  URL.revokeObjectURL(cached.objectUrl)
-  cowartAssetObjectUrlCache.delete(cacheKey)
-  if (cowartAssetSourceKeys.get(cached.src) === cacheKey) {
-    cowartAssetSourceKeys.delete(cached.src)
-  }
-}
-
 function revokeCowartAssetObjectUrls() {
-  for (const cacheKey of Array.from(cowartAssetObjectUrlCache.keys())) {
-    revokeCowartCachedAsset(cacheKey)
-  }
+  cowartAssetObjectUrlCache.clear()
+}
+
+function retainCowartEditorAssets(editor) {
+  const assets = editor.getCurrentPageShapes()
+    .map((shape) => shape?.props?.assetId ? editor.getAsset(shape.props.assetId) : null)
+    .filter(Boolean)
+  cowartAssetObjectUrlCache.retain(assets)
+}
+
+function cowartAssetReferencesChanged(changes) {
+  if (Object.values(changes.added).some((record) => record.typeName === 'asset' || record.typeName === 'shape')) return true
+  if (Object.values(changes.removed).some((record) => record.typeName === 'asset' || record.typeName === 'shape')) return true
+  return Object.values(changes.updated).some(([previous, next]) =>
+    next.typeName === 'asset' ||
+    (next.typeName === 'shape' && (previous.props?.assetId !== next.props?.assetId || previous.parentId !== next.parentId)) ||
+    (next.typeName === 'instance' && previous.currentPageId !== next.currentPageId)
+  )
 }
 
 function blobFromBase64(dataBase64, mimeType) {
-  const binary = window.atob(String(dataBase64 || ''))
-  const chunks = []
-  const chunkSize = 8192
-  for (let offset = 0; offset < binary.length; offset += chunkSize) {
-    const slice = binary.slice(offset, offset + chunkSize)
-    const bytes = new Uint8Array(slice.length)
-    for (let index = 0; index < slice.length; index += 1) {
-      bytes[index] = slice.charCodeAt(index)
-    }
-    chunks.push(bytes)
-  }
-  return new Blob(chunks, { type: mimeType || 'application/octet-stream' })
+  return cowartBlobFromBase64(dataBase64, mimeType)
 }
 
 async function resolveCowartTldrawAssetUrl(asset) {
@@ -456,21 +451,8 @@ async function resolveCowartTldrawAssetUrl(asset) {
   if (!src) return null
   if (!hasCowartWidgetBridge() || !isCowartLocalAssetUrl(src)) return src
 
-  const cacheKey = cowartAssetCacheKey(asset)
-  const cached = cowartAssetObjectUrlCache.get(cacheKey)
-  if (cached) return cached.objectUrl
-
-  const previousKey = cowartAssetSourceKeys.get(src)
-  if (previousKey && previousKey !== cacheKey) {
-    revokeCowartCachedAsset(previousKey)
-  }
-
   try {
-    const pageAsset = await readCowartPageAsset(src)
-    const objectUrl = URL.createObjectURL(blobFromBase64(pageAsset.dataBase64, pageAsset.mimeType))
-    cowartAssetObjectUrlCache.set(cacheKey, { objectUrl, src })
-    cowartAssetSourceKeys.set(src, cacheKey)
-    return objectUrl
+    return await cowartAssetObjectUrlCache.resolve(asset)
   } catch (error) {
     console.warn('Cowart could not resolve local page asset through MCP; falling back to source URL.', error)
     return src
@@ -2759,6 +2741,18 @@ function stopEditorOverlayEvent(event) {
   event.stopPropagation()
 }
 
+function handleGenerationPromptKeyDown(event, submit) {
+  stopEditorOverlayEvent(event)
+  if (
+    event.key !== 'Enter' || event.shiftKey || event.altKey ||
+    event.isComposing || event.nativeEvent?.isComposing ||
+    event.keyCode === 229 || event.nativeEvent?.keyCode === 229
+  ) return
+
+  event.preventDefault()
+  if (!event.repeat) submit(event)
+}
+
 async function sendAiImageGenerationRequest({ holderShape, userPrompt, referenceFiles = [] }) {
   const sender = followUpSender()
   if (!sender) {
@@ -3157,13 +3151,14 @@ function CowartHtmlDraftEmbed({ shape }) {
   useEffect(() => {
     setHtmlSource(null)
     setLoadError(null)
-    // Newly generated drafts already carry their complete HTML as a data URL. Prefer that local
-    // source so the first render does not depend on the MCP proxy becoming ready at the same time.
+    // Read saved drafts lazily through MCP; still support legacy inline drafts
+    // while they are being migrated to compact file-backed records.
     const shouldReadPageAsset = !directHtmlUrl && draftAssetUrl && hasCowartWidgetBridge()
     const browserSourceUrl = directHtmlUrl || (!shouldReadPageAsset && draftAssetUrl)
     if (!shouldReadPageAsset && !browserSourceUrl) return undefined
 
     let isDisposed = false
+    const controller = new AbortController()
 
     async function readDraftAssetWithRetry() {
       let lastError = null
@@ -3172,9 +3167,10 @@ function CowartHtmlDraftEmbed({ shape }) {
         if (delay > 0) await new Promise((resolve) => window.setTimeout(resolve, delay))
         if (isDisposed) return null
         try {
-          const pageAsset = await readCowartPageAsset(draftAssetUrl)
+          const pageAsset = await readCowartPageAsset(draftAssetUrl, { signal: controller.signal })
           return blobFromBase64(pageAsset.dataBase64, pageAsset.mimeType).text()
         } catch (error) {
+          if (error.name === 'AbortError') throw error
           lastError = error
         }
       }
@@ -3183,15 +3179,15 @@ function CowartHtmlDraftEmbed({ shape }) {
 
     const htmlSourcePromise = shouldReadPageAsset
       ? readDraftAssetWithRetry()
-      : window.fetch(browserSourceUrl).then((response) => {
+      : window.fetch(browserSourceUrl, { signal: controller.signal }).then((response) => {
           if (!response.ok) throw new Error(`HTML 草稿加载失败：${response.status}`)
           return response.text()
         })
 
     htmlSourcePromise
       .then((htmlContent) => {
-        if (htmlContent === null) return null
-        return hasCowartWidgetBridge() ? hydrateCowartHtmlDraftLocalImages(htmlContent) : htmlContent
+        if (isDisposed || htmlContent === null) return null
+        return hasCowartWidgetBridge() ? hydrateCowartHtmlDraftLocalImages(htmlContent, { signal: controller.signal }) : htmlContent
       })
       .then((htmlContent) => {
         if (isDisposed || htmlContent === null) return
@@ -3205,8 +3201,9 @@ function CowartHtmlDraftEmbed({ shape }) {
 
     return () => {
       isDisposed = true
+      controller.abort()
     }
-  }, [directHtmlUrl, draftAssetUrl])
+  }, [directHtmlUrl, draftAssetUrl, shape.meta?.cowartHtmlDraftContentHash])
 
   useEffect(() => {
     if (!isCowartFilmShape(shape) || !htmlSource || !frameLoadVersion) return undefined
@@ -3239,17 +3236,22 @@ function CowartHtmlDraftEmbed({ shape }) {
 
   const persistDomEdits = useCallback(
     async (htmlContent) => {
-      const result = await updateCowartHtmlDraft({ draftShapeId: shape.id, htmlContent })
-      const latestShape = editor.getShape(shape.id)
-      if (!isCowartHtmlDraftEmbedShape(latestShape)) return
-      editor.updateShape({
-        id: shape.id,
-        type: 'embed',
-        meta: {
-          ...latestShape.meta,
-          ...(result?.assetUrl ? { cowartHtmlDraftAssetUrl: result.assetUrl } : {})
-        },
-        props: { url: cowartHtmlDraftDataUrl(htmlContent) }
+      await updateCowartHtmlDraft({ draftShapeId: shape.id, htmlContent }, {
+        applyResult(result) {
+          const latestShape = editor.getShape(shape.id)
+          if (!isCowartHtmlDraftEmbedShape(latestShape)) return false
+          editor.updateShape({
+            id: shape.id,
+            type: 'embed',
+            meta: {
+              ...latestShape.meta,
+              ...(result?.assetUrl ? { cowartHtmlDraftAssetUrl: result.assetUrl } : {}),
+              ...(result?.contentHash ? { cowartHtmlDraftContentHash: result.contentHash } : {})
+            },
+            props: { url: result?.assetUrl ? cowartHtmlDraftVirtualUrl(result.assetUrl) : cowartHtmlDraftDataUrl(htmlContent) }
+          })
+          return true
+        }
       })
     },
     [editor, shape.id]
@@ -3633,14 +3635,6 @@ function CowartSlidesMedia({ onUnhandledHtmlClick, shape, title }) {
         const assetSource = asset?.props?.src
         if (!asset || !assetSource) throw new Error('图片资源不可用')
 
-        if (assetSource.startsWith(PAGE_ASSETS_ROUTE) && hasCowartWidgetBridge()) {
-          const pageAsset = await readCowartPageAsset(assetSource)
-          return {
-            kind: 'image',
-            url: `data:${pageAsset.mimeType};base64,${pageAsset.dataBase64}`
-          }
-        }
-
         if (assetSource.startsWith('data:') || /^https?:\/\//.test(assetSource)) {
           return { kind: 'image', url: assetSource }
         }
@@ -3695,7 +3689,7 @@ function CowartSlidesMedia({ onUnhandledHtmlClick, shape, title }) {
     return () => {
       disposed = true
     }
-  }, [editor, shape.id, shape.props?.assetId, shape.props?.url, shape.meta?.cowartHtmlDraftAssetUrl])
+  }, [editor, shape.id, shape.props?.assetId, shape.props?.url, shape.meta?.cowartHtmlDraftAssetUrl, shape.meta?.cowartHtmlDraftContentHash])
 
   useEffect(
     () => () => {
@@ -4081,6 +4075,7 @@ function CowartAiImageGenerationPanel() {
     [editor]
   )
   const fileInputRef = useRef(null)
+  const submitInFlightRef = useRef(false)
   const [promptValue, setPromptValue] = useState('')
   const [referenceFiles, setReferenceFiles] = useState([])
   const [referencePreviews, setReferencePreviews] = useState([])
@@ -4168,7 +4163,8 @@ function CowartAiImageGenerationPanel() {
 
   async function handleSubmit(event) {
     event?.preventDefault()
-    if (!canSend || isSending) return
+    if (!canSend || isSending || submitInFlightRef.current) return
+    submitInFlightRef.current = true
 
     setStatus('sending')
     setErrorMessage('')
@@ -4185,14 +4181,13 @@ function CowartAiImageGenerationPanel() {
       console.error(error)
       setStatus('error')
       setErrorMessage(error instanceof Error ? error.message : '发送失败，请重试。')
+    } finally {
+      submitInFlightRef.current = false
     }
   }
 
   function handlePromptKeyDown(event) {
-    stopEditorOverlayEvent(event)
-    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-      handleSubmit(event)
-    }
+    handleGenerationPromptKeyDown(event, handleSubmit)
   }
 
   function handlePromptPaste(event) {
@@ -4333,6 +4328,7 @@ function CowartAiDraftGenerationPanel() {
     [editor]
   )
   const fileInputRef = useRef(null)
+  const submitInFlightRef = useRef(false)
   const [promptValue, setPromptValue] = useState('')
   const [referenceFiles, setReferenceFiles] = useState([])
   const [referencePreviews, setReferencePreviews] = useState([])
@@ -4425,7 +4421,8 @@ function CowartAiDraftGenerationPanel() {
 
   async function handleSubmit(event) {
     event?.preventDefault()
-    if (!canSend || isSending) return
+    if (!canSend || isSending || submitInFlightRef.current) return
+    submitInFlightRef.current = true
 
     setStatus('sending')
     setErrorMessage('')
@@ -4445,14 +4442,13 @@ function CowartAiDraftGenerationPanel() {
       console.error(error)
       setStatus('error')
       setErrorMessage(error instanceof Error ? error.message : '发送失败，请重试。')
+    } finally {
+      submitInFlightRef.current = false
     }
   }
 
   function handlePromptKeyDown(event) {
-    stopEditorOverlayEvent(event)
-    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-      handleSubmit(event)
-    }
+    handleGenerationPromptKeyDown(event, handleSubmit)
   }
 
   function handlePromptPaste(event) {
@@ -4626,6 +4622,7 @@ function CowartAiSlidesGenerationPanel() {
     [editor]
   )
   const fileInputRef = useRef(null)
+  const submitInFlightRef = useRef(false)
   const customPageCountInputRef = useRef(null)
   const pageCountMenuRef = useRef(null)
   const [promptValue, setPromptValue] = useState('')
@@ -4745,7 +4742,8 @@ function CowartAiSlidesGenerationPanel() {
 
   async function handleSubmit(event) {
     event?.preventDefault()
-    if (!canSend || isSending) return
+    if (!canSend || isSending || submitInFlightRef.current) return
+    submitInFlightRef.current = true
 
     setStatus('sending')
     setErrorMessage('')
@@ -4763,12 +4761,13 @@ function CowartAiSlidesGenerationPanel() {
       console.error(error)
       setStatus('error')
       setErrorMessage(error instanceof Error ? error.message : '发送失败，请重试。')
+    } finally {
+      submitInFlightRef.current = false
     }
   }
 
   function handlePromptKeyDown(event) {
-    stopEditorOverlayEvent(event)
-    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') handleSubmit(event)
+    handleGenerationPromptKeyDown(event, handleSubmit)
   }
 
   function handlePromptPaste(event) {
@@ -4925,6 +4924,14 @@ function CowartAiSlidesGenerationPanel() {
 }
 
 function CowartStylePanel(props) {
+  const editor = useEditor()
+  const isSelectTool = useValue(
+    'cowart style panel select tool',
+    () => editor.getCurrentToolId() === 'select',
+    [editor]
+  )
+  if (isSelectTool) return null
+
   return (
     <DefaultStylePanel {...props}>
       <DefaultStylePanelContent />
@@ -6075,6 +6082,19 @@ function getCowartSelectionSnapshot(editor) {
   }
 }
 
+function getCowartSelectionRecords(editor) {
+  return editor.getSelectedShapeIds().map((id) => {
+    const shape = editor.getShape(id)
+    return [id, shape, shape?.props?.assetId ? editor.getAsset(shape.props.assetId) : null]
+  })
+}
+
+function cowartSelectionRecordsEqual(left, right) {
+  return Boolean(left && right && left.length === right.length && left.every((records, index) =>
+    records.every((record, recordIndex) => record === right[index][recordIndex])
+  ))
+}
+
 function getCowartViewState(editor) {
   const camera = editor.getCamera()
   return {
@@ -6160,6 +6180,9 @@ export default function App() {
     let isDisposed = false
     let lastWrittenSelectionState = ''
     let lastSyncedSelectionState = ''
+    let lastSelectionRecords = null
+    let selectionSnapshot = null
+    let selectionState = ''
     let isSelectionStateSaving = false
     let hasPendingSelectionState = false
     let lastSyncedViewState = ''
@@ -6171,8 +6194,14 @@ export default function App() {
     })
 
     async function syncSelectionState() {
-      const selectionSnapshot = getCowartSelectionSnapshot(editor)
-      const selectionState = JSON.stringify(selectionSnapshot)
+      const selectionRecords = getCowartSelectionRecords(editor)
+      if (!cowartSelectionRecordsEqual(selectionRecords, lastSelectionRecords)) {
+        // Store records are immutable. Idle ticks can compare identities without
+        // serializing selected inline HTML or image payloads four times a second.
+        lastSelectionRecords = selectionRecords
+        selectionSnapshot = getCowartSelectionSnapshot(editor)
+        selectionState = JSON.stringify(selectionSnapshot)
+      }
       if (selectionState !== lastWrittenSelectionState) {
         writeCowartSelectionState(selectionSnapshot)
         lastWrittenSelectionState = selectionState
@@ -6186,11 +6215,12 @@ export default function App() {
 
       isSelectionStateSaving = true
       try {
+        const savingSelectionState = selectionState
         await saveCowartSelectionState({
           ...selectionSnapshot,
           updatedAt: new Date().toISOString()
         })
-        lastSyncedSelectionState = selectionState
+        lastSyncedSelectionState = savingSelectionState
       } catch (error) {
         console.error(error)
       } finally {
@@ -6283,12 +6313,113 @@ export default function App() {
     let hasPendingSave = false
     let hasUnsavedChanges = false
     let documentChangeVersion = 0
+    let saveConflict = false
+    let conflictNotice = null
+    let conflictBackupVersion = null
+    let conflictBackupStore = null
+    let conflictReloadButton = null
     let isSyncingAnnotationShape = false
     let remoteLoadController = null
+    let lastAppliedRemoteSnapshot = null
     const acknowledgedImageShapeDeletes = new Set()
 
+    function showSaveConflict() {
+      if (conflictNotice || isDisposed) return
+      const notice = containerDocument.createElement('div')
+      notice.setAttribute('role', 'alert')
+      notice.setAttribute('data-cowart-save-conflict', '')
+      Object.assign(notice.style, {
+        position: 'fixed', top: '12px', left: '50%', transform: 'translateX(-50%)',
+        zIndex: '100000', maxWidth: 'calc(100% - 32px)', padding: '12px', borderRadius: '8px',
+        background: '#fff7ed', color: '#7c2d12', border: '1px solid #fdba74', boxShadow: '0 2px 12px #0002'
+      })
+      const message = containerDocument.createElement('div')
+      message.textContent = '画布已被其他操作更新，当前修改尚未保存。请先备份，再加载最新画布。'
+      const backup = containerDocument.createElement('button')
+      backup.type = 'button'
+      backup.textContent = '备份当前修改'
+      const reload = containerDocument.createElement('button')
+      reload.type = 'button'
+      reload.textContent = '加载最新画布'
+      reload.disabled = true
+      conflictReloadButton = reload
+      backup.addEventListener('click', async () => {
+        backup.disabled = true
+        const backupVersion = documentChangeVersion
+        try {
+          const json = JSON.stringify(editor.store.getStoreSnapshot(), null, 2)
+          const backupStore = JSON.parse(json).store
+          const downloaded = await downloadCowartFile({
+            fileName: `cowart-unsaved-${Date.now()}.json`,
+            mimeType: 'application/json',
+            dataUrl: `data:application/json;charset=utf-8,${encodeURIComponent(json)}`
+          })
+          if (!downloaded?.ok) throw new Error('备份未保存，请重试。')
+          if (isDisposed) return
+          conflictBackupVersion = backupVersion
+          conflictBackupStore = backupStore
+          // Store listeners flush on the next frame. Check the document itself
+          // as well, so edits made while the download is pending need a backup.
+          reload.disabled = documentChangeVersion !== backupVersion || storeChangedSinceSnapshot(editor, backupStore)
+          message.textContent = reload.disabled
+            ? '备份已保存；画布又有新修改，请再次备份后加载最新画布。'
+            : '备份已保存到下载目录。现在可以加载最新画布。'
+        } catch (error) {
+          if (!isDisposed) message.textContent = `备份失败，当前修改仍保留在画布中：${error.message}`
+        } finally { backup.disabled = false }
+      })
+      reload.addEventListener('click', async () => {
+        if (
+          conflictBackupVersion !== documentChangeVersion ||
+          !conflictBackupStore ||
+          storeChangedSinceSnapshot(editor, conflictBackupStore)
+        ) {
+          reload.disabled = true
+          message.textContent = '画布又有新修改，请再次备份后加载最新画布。'
+          return
+        }
+        reload.disabled = true
+        const replacingVersion = documentChangeVersion
+        const replacingStore = conflictBackupStore
+        try {
+          const nextSnapshot = await refreshCowartCanvasSnapshot()
+          if (isDisposed) return
+          if (documentChangeVersion !== replacingVersion || storeChangedSinceSnapshot(editor, replacingStore)) {
+            message.textContent = '画布又有新修改，请再次备份后加载最新画布。'
+            return
+          }
+          const sanitized = sanitizeCanvasSnapshotForTldraw(nextSnapshot)
+          if (!sanitized.snapshot || sanitized.skippedRecords.length) throw new Error('最新画布暂时无法完整加载，请稍后重试。')
+          editor.store.mergeRemoteChanges(() => {
+            editor.store.loadStoreSnapshot(sanitized.snapshot)
+            editor.store.ensureStoreIsUsable()
+          })
+          // Recovery replaces the whole document. Undo entries from the local
+          // version must not be replayed against the newly accepted revision.
+          editor.clearHistory()
+          acceptCowartCanvasSnapshot(nextSnapshot)
+          lastAppliedRemoteSnapshot = nextSnapshot
+          hasUnsavedChanges = false
+          hasPendingSave = false
+          acknowledgedImageShapeDeletes.clear()
+          saveConflict = false
+          conflictNotice?.remove()
+          conflictNotice = null
+          conflictReloadButton = null
+        } catch (error) {
+          if (!isDisposed) {
+            message.textContent = `加载失败，当前修改仍保留在画布中：${error.message}`
+            reload.disabled = conflictBackupVersion !== documentChangeVersion || storeChangedSinceSnapshot(editor, conflictBackupStore)
+          }
+        }
+      })
+      notice.append(message, backup, reload)
+      containerDocument.body.appendChild(notice)
+      conflictNotice = notice
+    }
+
     async function saveCanvas() {
-      if (!hasUnsavedChanges) return
+      if (!hasUnsavedChanges || saveConflict) return
 
       if (isSaving) {
         hasPendingSave = true
@@ -6299,7 +6430,7 @@ export default function App() {
       const savingVersion = documentChangeVersion
       const acknowledgedDeletesInSave = new Set(acknowledgedImageShapeDeletes)
       try {
-        const saveResult = await saveCowartCanvasSnapshot(editor.store.getStoreSnapshot(), {
+        const saveResult = await saveCowartCanvasSnapshot(() => editor.store.getStoreSnapshot(), {
           protectImageRecords: true,
           acknowledgedImageShapeDeletes: Array.from(acknowledgedImageShapeDeletes)
         })
@@ -6312,9 +6443,14 @@ export default function App() {
         hasUnsavedChanges = documentChangeVersion !== savingVersion
       } catch (error) {
         console.error(error)
+        if (error.storage === 'revision-conflict') {
+          saveConflict = true
+          remoteLoadController?.abort()
+          showSaveConflict()
+        }
       } finally {
         isSaving = false
-        if (hasPendingSave || hasUnsavedChanges) {
+        if (!saveConflict && (hasPendingSave || hasUnsavedChanges)) {
           hasPendingSave = false
           scheduleSave()
         }
@@ -6324,8 +6460,10 @@ export default function App() {
     function scheduleSave() {
       documentChangeVersion += 1
       hasUnsavedChanges = true
+      if (conflictReloadButton) conflictReloadButton.disabled = true
       window.clearTimeout(saveTimer)
       window.clearTimeout(slidesLayoutTimer)
+      if (saveConflict) return
       if (isSaving) hasPendingSave = true
       saveTimer = window.setTimeout(saveCanvas, 500)
     }
@@ -6333,7 +6471,7 @@ export default function App() {
     async function loadRemoteCanvasSnapshot() {
       // An MCP call can outlive the polling interval. Keep one request in flight
       // instead of abandoning it and accumulating work in the host bridge.
-      if (isDisposed || remoteLoadController) return
+      if (isDisposed || saveConflict || remoteLoadController) return
       const controller = new AbortController()
       remoteLoadController = controller
 
@@ -6343,23 +6481,16 @@ export default function App() {
       try {
         const nextSnapshot = await refreshCowartCanvasSnapshot(controller.signal)
         if (isDisposed || controller.signal.aborted) return
+        if (nextSnapshot === lastAppliedRemoteSnapshot) return
         const effectivePreserve =
           preserveLocalChanges || (preFetchStore && storeChangedSinceSnapshot(editor, preFetchStore))
-        const { changedRecords } = applyRemoteCanvasSnapshot(
-          editor,
-          nextSnapshot,
-          {
-            preserveLocalChanges: effectivePreserve
-          }
-        )
-
-        if (changedRecords > 0 && effectivePreserve) {
-          hasUnsavedChanges = true
-          if (isSaving) {
-            hasPendingSave = true
-          } else {
-            scheduleSave()
-          }
+        // The client retains the latest remote response until local edits are
+        // saved. Reconciliation cannot apply it while those edits are pending.
+        if (effectivePreserve) return
+        const result = applyRemoteCanvasSnapshot(editor, nextSnapshot)
+        if (!result.skippedRecords?.length) {
+          acceptCowartCanvasSnapshot(nextSnapshot)
+          lastAppliedRemoteSnapshot = nextSnapshot
         }
       } catch (error) {
         if (error.name === 'AbortError') return
@@ -6382,6 +6513,14 @@ export default function App() {
         source: 'user',
         scope: 'document'
       }
+    )
+
+    retainCowartEditorAssets(editor)
+    const unsubscribeAssetCache = editor.store.listen(
+      ({ changes }) => {
+        if (cowartAssetReferencesChanged(changes)) retainCowartEditorAssets(editor)
+      },
+      { source: 'all', scope: 'all' }
     )
 
     let canvasEvents = null
@@ -6468,6 +6607,7 @@ export default function App() {
       window.clearInterval(viewStateTimer)
       window.clearInterval(canvasRefreshTimer)
       remoteLoadController?.abort()
+      conflictNotice?.remove()
       canvasEvents?.close()
       if (window.__cowartEditor === editor) {
         delete window.__cowartEditor
@@ -6476,6 +6616,8 @@ export default function App() {
       }
       document.getElementById(SELECTION_STATE_ELEMENT_ID)?.remove()
       unsubscribe()
+      unsubscribeAssetCache()
+      revokeCowartAssetObjectUrls()
       unsubscribeAnnotationEditingToolLock()
       unsubscribeAnnotationShapeSync()
       editor.off('event', handleSlidesPointerUp)

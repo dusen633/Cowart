@@ -258,11 +258,13 @@ function mcpHostBridgeScript(appVersion) {
       try {
         if (!app || typeof app.callServerTool !== "function") throw new Error("Host tool bridge is unavailable.");
         await waitForReady(app);
-        return await withTimeout(
-          app.callServerTool(request, options),
-          options?.timeoutMs || 30000,
-          "Cowart server tool call timed out.",
-        );
+        // Let the SDK own the deadline: it removes pending response handlers
+        // and notifies the host on timeout. Promise.race only abandoned the
+        // caller while the underlying tool request continued to retain data.
+        return await app.callServerTool(request, {
+          ...options,
+          timeout: options?.timeoutMs || options?.timeout || 30000,
+        });
       } catch (error) {
         throw toBridgeError(error);
       }
