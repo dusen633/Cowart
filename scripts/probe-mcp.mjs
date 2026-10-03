@@ -89,6 +89,14 @@ try {
   if (!Object.hasOwn(analyticsTool?.inputSchema?.properties || {}, "eventId")) {
     throw new Error("Cowart analytics tool should accept a dedupe eventId shared with PostHog.");
   }
+  const analyticsProperties = analyticsTool.inputSchema.properties
+  const filmParameters = analyticsProperties.parameters.properties
+  if (!filmParameters.ai_type.enum.includes('film') || !filmParameters.prompt_type.enum.includes('ai_film') ||
+      !analyticsProperties.eventName.enum.includes('ai_film_inserted') ||
+      !analyticsProperties.eventName.enum.includes('ai_film_export_cancelled') ||
+      filmParameters.film_duration.maximum !== 120 || !filmParameters.film_style.enum.includes('data-flow')) {
+    throw new Error("Cowart MCP analytics must accept film events and bounded film metadata.")
+  }
   const htmlDraftTool = tools.tools.find((tool) => tool.name === "insert_cowart_html_draft");
   if (!/AI film/.test(htmlDraftTool?.description || "")) {
     throw new Error("Cowart HTML draft insertion should document AI film holder inheritance.");

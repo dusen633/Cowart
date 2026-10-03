@@ -1,3 +1,6 @@
+import { FILM_STYLES } from "../src/filmConfig.js";
+import { createFilmInsertionAnalytics } from "./lib/film-analytics.mjs";
+
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -1187,6 +1190,11 @@ async function launcherCanvasState(target, { ensurePage = false } = {}) {
   return { snapshot: state.snapshot, storage: state.storage, viewState: state.viewState };
 }
 
+const filmInsertionAnalytics = createFilmInsertionAnalytics({
+  sendGa4: (event) => analyticsDelivery("ga4", () => sendCowartGa4Event(event)),
+  sendPosthog: (event) => analyticsDelivery("posthog", () => sendCowartPosthogEvent(event)),
+});
+
 function registerCowartAnalyticsTools(mcpServer) {
   registerAppTool(
     mcpServer,
@@ -1196,18 +1204,27 @@ function registerCowartAnalyticsTools(mcpServer) {
       description:
         "Use this when the Cowart widget records an anonymous product-usage event in Google Analytics and PostHog.",
       inputSchema: {
+        ...projectArgsSchema,
         clientId: z.string().trim().min(1).max(128),
         eventName: z.enum(COWART_GA4_EVENT_NAMES),
         appVersion: z.string().trim().min(1).max(32),
         eventId: z.string().trim().min(1).max(128).optional(),
         parameters: z.object({
           annotation_type: z.enum(["arrow"]).optional(),
-          ai_type: z.enum(["image", "html", "slides"]).optional(),
+          ai_type: z.enum(["image", "html", "slides", "film"]).optional(),
           has_reference: z.enum(["yes", "no"]).optional(),
           page_count: z.number().int().min(1).max(100).optional(),
+          film_style: z.enum(FILM_STYLES.map((style) => style.id)).optional(),
+          film_duration: z.number().min(1).max(120).optional(),
+          film_width: z.number().min(1).max(16384).optional(),
+          film_height: z.number().min(1).max(16384).optional(),
+          film_muted: z.enum(["yes", "no"]).optional(),
+          playback_action: z.enum(["play", "pause", "seek", "mute"]).optional(),
+          export_format: z.enum(["mp4", "html"]).optional(),
           prompt_type: z.enum([
             "ai_image",
             "ai_html",
+            "ai_film",
             "ai_slides",
             "annotation_edit",
             "annotation_html",
@@ -1231,7 +1248,10 @@ function registerCowartAnalyticsTools(mcpServer) {
         "openai/widgetAccessible": true,
       },
     },
-    async ({ clientId, eventName, appVersion, eventId, parameters }) => {
+    async ({ projectDir, canvasDir, clientId, eventName, appVersion, eventId, parameters }) => {
+      if (projectDir || canvasDir) {
+        filmInsertionAnalytics.remember(resolveCanvasDir({ projectDir, canvasDir }), { clientId, appVersion });
+      }
       // Each provider owns its delivery state so one failing endpoint cannot
       // hold back the other, and the widget can retry only the missing one.
       const [ga4, posthog] = await Promise.all([
@@ -1599,11 +1619,13 @@ function registerCowartImageTools(mcpServer) {
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: false,
-        openWorldHint: false,
+        openWorldHint: true,
       },
     },
     async (input = {}) => {
       const result = await insertCowartHtmlDraft(input);
+      // Save succeeded; telemetry runs in the background, including updates.
+      void filmInsertionAnalytics.track(result.canvasDir, result);
       return {
         content: [
           {

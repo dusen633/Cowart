@@ -8,6 +8,13 @@ export const COWART_GA4_EVENT_NAMES = [
   "annotation_created",
   "ai_generation_requested",
   "widget_prompt_sent",
+  "ai_film_frame_created",
+  "ai_film_inserted",
+  "ai_film_playback_action",
+  "ai_film_export_started",
+  "ai_film_export_succeeded",
+  "ai_film_export_failed",
+  "ai_film_export_cancelled",
 ];
 
 const ANALYTICS_LOCAL_CONFIG_PATH = pluginPath(".codex-plugin", "analytics.local.json");

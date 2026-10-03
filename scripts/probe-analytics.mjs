@@ -270,4 +270,26 @@ assert.deepEqual({
 assert.equal(mcpEventCallbackCompleted, true)
 assert.equal(mcpWindowObject.gtag, undefined)
 
+// Film events retain their bounded metadata through the native MCP path.
+mcpWindowObject.openai = { toolOutput: { projectDir: '/private/project' } }
+const filmMetadata = { filmStyle: 'data-flow', filmDuration: 18, filmMuted: false, filmWidth: 1024, filmHeight: 576 }
+mcpAnalytics.trackAiGenerationRequested({ aiType: 'film', ...filmMetadata, prompt: 'private prompt' })
+mcpAnalytics.trackWidgetPromptSent({ promptType: 'ai_film' })
+mcpAnalytics.trackFilmFrameCreated(filmMetadata)
+for (const action of ['play', 'pause', 'seek', 'mute']) mcpAnalytics.trackFilmPlaybackAction({ ...filmMetadata, action })
+for (const stage of ['started', 'succeeded', 'failed', 'cancelled']) mcpAnalytics.trackFilmExport({ ...filmMetadata, stage })
+assert.equal(mcpAnalytics.trackFilmPlaybackAction({ action: 'private value' }), false)
+assert.equal(mcpAnalytics.trackFilmExport({ stage: 'private value' }), false)
+await new Promise((resolve) => setTimeout(resolve, 0))
+const nativeFilmEvents = mcpCalls.slice(1).map((call) => call.arguments)
+assert.equal(nativeFilmEvents.length, 11)
+assert.ok(nativeFilmEvents.every((event) => event.projectDir === '/private/project'))
+assert.deepEqual(nativeFilmEvents[0].parameters, {
+  ai_type: 'film', has_reference: 'no', film_style: 'data-flow', film_duration: 18,
+  film_muted: 'no', film_width: 1024, film_height: 576
+})
+assert.equal(nativeFilmEvents[1].parameters.prompt_type, 'ai_film')
+assert.ok(nativeFilmEvents.every((event) => !JSON.stringify(event.parameters).includes('/private/project')))
+assert.ok(nativeFilmEvents.every((event) => !Object.hasOwn(event.parameters, 'prompt')))
+
 console.log('Cowart analytics probe OK')

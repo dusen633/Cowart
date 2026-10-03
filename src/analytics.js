@@ -1,3 +1,5 @@
+import { filmAnalyticsParameters } from './filmAnalytics.js'
+
 const DEFAULT_MEASUREMENT_ID = 'G-SJYHV19YZ9'
 // Public write-only PostHog project token for the Cowart widget property.
 const DEFAULT_POSTHOG_PROJECT_TOKEN = 'phc_wEcJJLKRLBQPdjitdRNqKEYwoCgVEEaj2rdcKjnGaWJv'
@@ -267,6 +269,10 @@ export function createCowartAnalytics({
 
     clientId ||= anonymousClientId(windowObject)
     Promise.resolve(callAnalyticsTool({
+      ...Object.fromEntries(Object.entries({
+        projectDir: windowObject.openai?.toolOutput?.projectDir,
+        canvasDir: windowObject.openai?.toolOutput?.canvasDir
+      }).filter(([, value]) => typeof value === 'string' && value.length > 0)),
       clientId,
       eventName,
       appVersion,
@@ -322,7 +328,8 @@ export function createCowartAnalytics({
       hasReference = false,
       pageCount,
       eventCallback,
-      eventTimeout
+      eventTimeout,
+      ...filmOptions
     } = {}) {
       const normalizedCount = normalizedPageCount(pageCount)
       return trackEvent(
@@ -330,10 +337,33 @@ export function createCowartAnalytics({
         {
           ai_type: normalizedAiType(aiType),
           has_reference: hasReference ? 'yes' : 'no',
-          ...(normalizedCount === undefined ? {} : { page_count: normalizedCount })
+          ...(normalizedCount === undefined ? {} : { page_count: normalizedCount }),
+          ...(aiType === 'film' ? filmAnalyticsParameters(filmOptions) : {})
         },
         { eventCallback, eventTimeout }
       )
+    },
+
+    trackFilmFrameCreated(parameters = {}) {
+      return trackEvent('ai_film_frame_created', { ai_type: 'film', ...filmAnalyticsParameters(parameters) })
+    },
+
+    trackFilmPlaybackAction({ action, ...parameters } = {}) {
+      if (!['play', 'pause', 'seek', 'mute'].includes(action)) return false
+      return trackEvent('ai_film_playback_action', {
+        ai_type: 'film',
+        playback_action: action,
+        ...filmAnalyticsParameters(parameters)
+      })
+    },
+
+    trackFilmExport({ stage, format = 'mp4', ...parameters } = {}) {
+      if (!['started', 'succeeded', 'failed', 'cancelled'].includes(stage) || !['mp4', 'html'].includes(format)) return false
+      return trackEvent(`ai_film_export_${stage}`, {
+        ai_type: 'film',
+        export_format: format,
+        ...filmAnalyticsParameters(parameters)
+      })
     },
 
     trackWidgetPromptSent({ promptType, hasReference = false, eventCallback, eventTimeout } = {}) {
@@ -366,6 +396,18 @@ export function trackAnnotationCreated() {
 
 export function trackAiGenerationRequested(parameters) {
   return cowartAnalytics().trackAiGenerationRequested(parameters)
+}
+
+export function trackFilmFrameCreated(parameters) {
+  return cowartAnalytics().trackFilmFrameCreated(parameters)
+}
+
+export function trackFilmPlaybackAction(parameters) {
+  return cowartAnalytics().trackFilmPlaybackAction(parameters)
+}
+
+export function trackFilmExport(parameters) {
+  return cowartAnalytics().trackFilmExport(parameters)
 }
 
 export function trackWidgetPromptSent(parameters) {
@@ -415,6 +457,11 @@ export async function sendTrackedWidgetMessage(
       aiType: analyticsContext.aiType,
       hasReference: analyticsContext.hasReference,
       pageCount: analyticsContext.pageCount,
+      filmStyle: analyticsContext.filmStyle,
+      filmDuration: analyticsContext.filmDuration,
+      filmMuted: analyticsContext.filmMuted,
+      filmWidth: analyticsContext.filmWidth,
+      filmHeight: analyticsContext.filmHeight,
       eventCallback,
       eventTimeout
     })

@@ -65,6 +65,7 @@ import { attachCowartFilmController } from './filmPlayback.js'
 import { renderCowartFilmMp4 } from './filmExport.js'
 import { getFilmOptions, buildFilmGenerationPrompt } from './filmConfig.js'
 import { FilmStyleButtons } from './FilmStyleButtons.jsx'
+import { filmAnalyticsContext, withFilmExportAnalytics } from './filmAnalytics.js'
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Download, FileCode, Film, Image as ImageIcon, Pause, Play, Volume2, VolumeX, X } from 'lucide-react'
 import 'tldraw/tldraw.css'
 import { reportCowartStartup } from './widgetStartup.js'
@@ -77,7 +78,10 @@ import annotationToolIconRaw from './assets/tool-comment.svg?raw'
 import {
   sendTrackedWidgetMessage,
   trackAnnotationCreated,
-  trackCanvasOpened
+  trackCanvasOpened,
+  trackFilmFrameCreated,
+  trackFilmPlaybackAction,
+  trackFilmExport
 } from './analytics.js'
 import {
   IS_COWART_WIDGET_BUILD,
@@ -752,11 +756,14 @@ function createAiDraftHolderAtViewportCenter(editor) {
 
 function createAiFilmHolderShape(editor, id, shapeOverrides = {}) {
   const { meta, props, ...rest } = shapeOverrides
-  return createAiDraftHolderShape(editor, id, {
+  const result = createAiDraftHolderShape(editor, id, {
     ...rest,
     meta: { cowartAiFilmHolder: true, cowartFilmStyle: 'product-launch', cowartFilmDuration: 15, cowartFilmMuted: false, ...meta },
     props: { name: AI_FILM_LABEL, ...props }
   })
+  const shape = editor.getShape(id)
+  if (shape) trackFilmFrameCreated(filmAnalyticsContext(shape))
+  return result
 }
 
 function createAiFilmHolderAtViewportCenter(editor) {
@@ -2076,26 +2083,28 @@ async function exportCowartHtmlDraft(editor, draftShapeId, format) {
 async function exportCowartFilm(editor, draftShapeId, onProgress, signal) {
   const shape = editor.getShape(draftShapeId)
   if (!isCowartFilmShape(shape)) throw new Error('请选择 AI 影片。')
-  // A separate iframe renders from zero without changing the preview or edits.
-  const html = await hydrateCowartHtmlDraftLocalImages(await readCowartHtmlDraftContent(shape))
-  const blob = await renderCowartFilmMp4({ html, width: Number(shape.props.w), height: Number(shape.props.h),
-    duration: getFilmOptions(shape).duration, onProgress, signal })
-  signal?.throwIfAborted()
-  const fileName = htmlDraftExportFileName(shape, 'mp4')
-  if (hasCowartWidgetBridge()) {
-    const dataUrl = await new Promise((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => resolve(reader.result)
-      reader.onerror = () => reject(reader.error)
-      reader.readAsDataURL(blob)
-    })
+  return withFilmExportAnalytics(async () => {
+    // A separate iframe renders from zero without changing the preview or edits.
+    const html = await hydrateCowartHtmlDraftLocalImages(await readCowartHtmlDraftContent(shape))
+    const blob = await renderCowartFilmMp4({ html, width: Number(shape.props.w), height: Number(shape.props.h),
+      duration: getFilmOptions(shape).duration, onProgress, signal })
     signal?.throwIfAborted()
-    return downloadCowartFile({ dataUrl, fileName, mimeType: 'video/mp4' })
-  }
-  const url = URL.createObjectURL(blob)
-  downloadDataUrl(url, fileName)
-  window.setTimeout(() => URL.revokeObjectURL(url), 60000)
-  return { fileName }
+    const fileName = htmlDraftExportFileName(shape, 'mp4')
+    if (hasCowartWidgetBridge()) {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result)
+        reader.onerror = () => reject(reader.error)
+        reader.readAsDataURL(blob)
+      })
+      signal?.throwIfAborted()
+      return downloadCowartFile({ dataUrl, fileName, mimeType: 'video/mp4' })
+    }
+    const url = URL.createObjectURL(blob)
+    downloadDataUrl(url, fileName)
+    window.setTimeout(() => URL.revokeObjectURL(url), 60000)
+    return { fileName }
+  }, filmAnalyticsContext(shape), trackFilmExport, signal)
 }
 
 async function exportCowartSlides(editor, slidesShapeId, format) {
@@ -2871,7 +2880,8 @@ async function sendAiDraftGenerationRequest({ holderShape, userPrompt, reference
     {
       promptType: isAiFilmHolderShape(holderShape) ? 'ai_film' : 'ai_html',
       aiType: isAiFilmHolderShape(holderShape) ? 'film' : 'html',
-      hasReference: imageReferences.length > 0
+      hasReference: imageReferences.length > 0,
+      ...(isAiFilmHolderShape(holderShape) ? filmAnalyticsContext(holderShape) : {})
     }
   )
 }
@@ -5423,7 +5433,10 @@ function CowartHtmlDraftToolbar({ draftShapeId }) {
     >
       {!isDomEditing && (
         <CowartExportMenu
-          onExportHtml={() => exportCowartHtmlDraft(editor, draftShapeId, 'html')}
+          onExportHtml={(_onProgress, signal) => isFilm
+            ? withFilmExportAnalytics(() => exportCowartHtmlDraft(editor, draftShapeId, 'html'),
+              { ...filmAnalyticsContext(editor.getShape(draftShapeId)), format: 'html' }, trackFilmExport, signal)
+            : exportCowartHtmlDraft(editor, draftShapeId, 'html')}
           onExportFilm={isFilm ? (onProgress, signal) => exportCowartFilm(editor, draftShapeId, onProgress, signal) : undefined}
           onExportImage={isFilm ? undefined : () => exportCowartHtmlDraft(editor, draftShapeId, 'image')}
           targetKey={`html-${draftShapeId}`}
@@ -5455,6 +5468,7 @@ function CowartHtmlDraftToolbar({ draftShapeId }) {
 
 function CowartFilmPlaybackControls({ draftShapeId, isEditing, isLocked = false }) {
   const editor = useEditor()
+  const seekChangedRef = useRef(false)
   const [status, setStatus] = useState(() => cowartFilmStatuses.get(draftShapeId) || {
     ...getFilmOptions(editor.getShape(draftShapeId)), currentTime: 0, playing: false, ready: false
   })
@@ -5471,7 +5485,16 @@ function CowartFilmPlaybackControls({ draftShapeId, isEditing, isLocked = false 
     if (isEditing) cowartFilmControllers.get(draftShapeId)?.command('pause')
   }, [draftShapeId, isEditing])
   function command(name, value) {
-    cowartFilmControllers.get(draftShapeId)?.command(name, value)
+    const controller = cowartFilmControllers.get(draftShapeId)
+    if (!controller) return
+    controller.command(name, value)
+    if (name !== 'seek') {
+      trackFilmPlaybackAction({
+        ...filmAnalyticsContext(editor.getShape(draftShapeId)),
+        action: name,
+        ...(name === 'mute' ? { filmMuted: value } : {})
+      })
+    }
     if (name === 'mute') {
       const shape = editor.getShape(draftShapeId)
       if (shape && shape.meta?.cowartFilmMuted !== value) {
@@ -5479,6 +5502,11 @@ function CowartFilmPlaybackControls({ draftShapeId, isEditing, isLocked = false 
         editor.updateShape({ id: shape.id, type: 'embed', meta: { ...shape.meta, cowartFilmMuted: value } })
       }
     }
+  }
+  function trackSeek() {
+    if (!seekChangedRef.current) return
+    seekChangedRef.current = false
+    trackFilmPlaybackAction({ ...filmAnalyticsContext(editor.getShape(draftShapeId)), action: 'seek' })
   }
   function formatTime(value) {
     const seconds = Math.floor(Number(value) || 0)
@@ -5492,7 +5520,14 @@ function CowartFilmPlaybackControls({ draftShapeId, isEditing, isLocked = false 
       </button>
       <input aria-label="影片进度" className="cowart-film-progress" type="range" min="0" max={status.duration || 15}
         step="any" value={status.currentTime || 0} disabled={!status.ready || isEditing || isLocked}
-        onChange={(event) => command('seek', Number(event.target.value))} />
+        onChange={(event) => { seekChangedRef.current = true; command('seek', Number(event.target.value)) }}
+        onPointerUp={trackSeek}
+        onBlur={trackSeek}
+        onKeyUp={(event) => {
+          if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) {
+            trackSeek()
+          }
+        }} />
       <span className="cowart-film-time">{formatTime(status.currentTime)} / {formatTime(status.duration)}</span>
       <button aria-label={status.muted ? '取消静音' : '静音影片'} aria-pressed={status.muted} disabled={!status.ready || isEditing || isLocked}
         onClick={() => command('mute', !status.muted)} type="button">
